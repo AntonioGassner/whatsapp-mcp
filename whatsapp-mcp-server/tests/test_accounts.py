@@ -71,22 +71,6 @@ def test_each_bridge_call_uses_its_own_url_and_store_token(account_store, accoun
     }
 
 
-def test_existing_tools_act_on_the_first_account_until_they_take_one(account_store, accounts_file, fake_bridge):
-    accounts_file(
-        [
-            _entry("personal", account_store("personal", token="personal-token"), 8081),
-            _entry("work", account_store("work", token="work-token"), 8082),
-        ]
-    )
-    fake_bridge.ports[8081] = FakeResponse()
-
-    assert main.mark_messages_read(["m1"], "12025551234@s.whatsapp.net")["success"] is True
-
-    assert [(call["url"], call["headers"]) for call in fake_bridge.calls] == [
-        ("http://localhost:8081/api/mark-read", {"Authorization": "Bearer personal-token"})
-    ]
-
-
 def test_account_with_missing_store_is_reported_without_failing(tmp_path, account_store, accounts_file, fake_bridge):
     accounts_file(
         [

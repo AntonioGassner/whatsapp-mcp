@@ -229,7 +229,7 @@ Send a text message to a contact or group, optionally as a quoted reply.
 - `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
 - `quoted_content` (optional): Text content of the quoted message, used for the reply preview. Only plain text is supported.
 - `mentions` (optional): List of users to @-mention, as phone numbers with country code (e.g. `["12025551234"]`) or JIDs. For each entry the message text must contain a matching `@<number>` token (e.g. `"thanks @12025551234!"`), which recipients' devices render as a highlighted, tappable mention that also notifies the user. Only meaningful in group chats.
-- `account` (required with several accounts): Account name from `list_accounts` to send from; optional with a single account
+- `account` (required with several accounts): Account name from `list_accounts` to send from; optional with a single account. A reply goes out from the account that holds the quoted message in this chat, so it needs `account` only when several accounts hold that message or none does
 
 Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
 
@@ -251,6 +251,7 @@ automatically.
 - `chat_jid` (required): JID of the chat containing the messages
 - `sender_jid` (required for groups): Full JID or bare phone number of the original message sender
 - `timestamp` (optional): RFC 3339 read timestamp; defaults to the current time
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused
 
 **Natural Language Examples:**
 
@@ -268,6 +269,7 @@ Send (or remove) an emoji reaction to a message.
 - `emoji` (required): Reaction emoji (e.g. `"👍"`). Pass an empty string `""` to remove an existing reaction.
 - `from_me` (optional, default `false`): Whether the original message was sent by the current user
 - `sender_jid` (optional): Full JID of the original message sender — required for group messages when `from_me` is `false` so the correct WhatsApp key is built
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused
 
 Inbound reactions received from others are stored automatically as messages with `media_type = "reaction"`. The `reaction_to_message_id` field in each reaction message indicates which message was reacted to.
 
@@ -339,6 +341,7 @@ only helps a client that can read the filesystem — use `view_media` otherwise.
 
 - `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused
 
 #### `view_media`
 
@@ -356,6 +359,7 @@ below 4 MB are returned unchanged and anything else reports what is missing.
 - `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
 - `max_dimension` (optional): longest edge in pixels, default `1024`
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused
 
 `max_dimension` must be an integer from `1` to `2048`. Invalid values are
 rejected before the server downloads or renders any media.
@@ -408,6 +412,7 @@ Cache reads and writes use both message ID and chat JID.
 - `message_id` (required): ID of the message with the voice note
 - `chat_jid` (required): JID of the chat containing the message
 - `force` (optional): transcribe again even when a transcript is stored
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused
 
 ### Chat Operations
 
@@ -811,11 +816,21 @@ with its `account`, and `also_in_accounts` names the others.
 themselves: with several accounts, `account` is required, and a send without
 it fails before any bridge is contacted, listing the valid names. The send goes
 to that account's bridge with that account's token, and the result carries
-`account` and `account_phone_number`, the number it went out from. For now this
-includes quoted replies.
+`account` and `account_phone_number`, the number it went out from.
 
-The reaction, read-receipt and media tools currently act on the first account
-in the file; using the account that holds the message is being added.
+Actions on an existing message (a quoted reply with `send_message`,
+`send_reaction`, `mark_messages_read`, `download_media`, `view_media` and
+`transcribe_audio`) use the account whose store holds that message in the given
+chat, so you don't name it. A direct message between two of your numbers is in
+each store under the other number's chat, so the chat tells the two sides
+apart. When several accounts hold the message (one in a group two of your
+numbers are in), `account` is required and the error names those accounts; when
+none does, `account` is required and the error lists the valid names. Naming an
+account that doesn't hold the message is refused. Nothing reaches a bridge
+until the account is settled, and the call goes to that account's bridge with
+that account's token. Reactions, receipts and replies report `account` and
+`account_phone_number`; media and transcript results report `account`. A
+transcript is stored in, and later served from, that account's store only.
 
 ### Run automatically on macOS
 

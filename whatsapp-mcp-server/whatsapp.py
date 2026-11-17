@@ -1389,6 +1389,37 @@ def mark_messages_read(
         return False, f"Unexpected error: {str(e)}"
 
 
+def holds_message(account: Account, message_id: str, chat_jid: str) -> bool:
+    """Whether the account's messages.db holds this message in this chat.
+
+    The chat may be a JID or, for a person, a bare phone number; a person's chat
+    is matched in its phone and LID forms, since the bridge may store either.
+    A message between two of the user's numbers is in each store under the
+    other number's chat, so the chat tells the two sides apart.
+
+    Raises:
+        FileNotFoundError: the account's messages.db is missing.
+    """
+    if not message_id or not chat_jid:
+        return False
+    user, _, server = chat_jid.partition("@")
+    if server in ("", "s.whatsapp.net", "lid"):
+        chats = [alias for alias in _sender_aliases(account, user) if "@" in alias]
+    else:
+        chats = [chat_jid]
+    conn = _connect_messages_db(account)
+    try:
+        row = conn.execute(
+            f"SELECT 1 FROM messages WHERE id = ? AND chat_jid IN ({','.join('?' * len(chats))}) LIMIT 1",
+            (message_id, *chats),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+    return row is not None
+
+
 def download_media(account: Account, message_id: str, chat_jid: str) -> str | None:
     """Download media from a message and return the local file path.
 

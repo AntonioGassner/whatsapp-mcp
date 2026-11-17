@@ -14,7 +14,7 @@ WHATSAPP_BRIDGE_TOKEN), so existing setups keep working unchanged.
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -116,6 +116,57 @@ class Registry:
                 f"valid accounts: {valid}"
             )
         return self.first()
+
+    def locate(self, holds: Callable[[Account], bool]) -> tuple[Account, ...]:
+        """The message locator: the accounts whose store holds a message, in file order.
+
+        holds(account) checks one account's messages store. An account whose
+        store is missing (FileNotFoundError) can't hold anything and is left out.
+        """
+        found = []
+        for account in self.accounts:
+            try:
+                if holds(account):
+                    found.append(account)
+            except FileNotFoundError:
+                continue
+        return tuple(found)
+
+    def holder(self, name: str | None, holds: Callable[[Account], bool], what: str) -> Account:
+        """The account an action on an existing message goes through: the one that holds it.
+
+        With one account nothing is looked up and that account acts, as it always
+        did. With several, the message locator decides: a message held by one
+        account uses it; held by several (a message in a group two of the user's
+        numbers are in) or by none, the account must be named.
+        A named account is used only if it holds the message or no account does.
+        `what` names the message in errors.
+
+        Raises:
+            ValueError: when the account can't be decided or the named one doesn't
+                hold the message; each says which accounts can be named.
+        """
+        named = self.get(name) if name else None
+        if not self.several:
+            return named or self.first()
+        held_by = self.locate(holds)
+        holders = ", ".join(account.name for account in held_by)
+        if named:
+            if held_by and named not in held_by:
+                raise ValueError(f"Account {named.name!r} does not hold {what}; it is held by: {holders}")
+            return named
+        if len(held_by) == 1:
+            return held_by[0]
+        if held_by:
+            raise ValueError(
+                f"{what[0].upper()}{what[1:]} is held by several accounts: {holders}; "
+                "ask the user which one to act from and pass it as account"
+            )
+        valid = ", ".join(account.name for account in self.accounts)
+        raise ValueError(
+            f"No account holds {what}; ask the user which account to act from and pass it as account; "
+            f"valid accounts: {valid}"
+        )
 
 
 def _default_account(environ: Mapping[str, str]) -> Account:

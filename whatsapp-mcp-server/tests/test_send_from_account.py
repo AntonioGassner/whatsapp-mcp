@@ -58,7 +58,7 @@ def send(request, media, converted_audio):
     src, _converted = converted_audio
     return {
         "send_message": lambda **kw: main.send_message(RECIPIENT, "hello", **kw),
-        # Until replies learn the account from the quoted message (#6), they name it too.
+        # No store holds m1, so a reply names its account like a new message.
         "send_message_quoted": lambda **kw: main.send_message(RECIPIENT, "hello", quoted_message_id="m1", **kw),
         "send_file": lambda **kw: main.send_file(RECIPIENT, media, "Q3 numbers", **kw),
         "send_audio_message": lambda **kw: main.send_audio_message(RECIPIENT, str(src), **kw),
