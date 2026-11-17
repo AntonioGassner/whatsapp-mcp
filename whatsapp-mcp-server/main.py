@@ -49,6 +49,9 @@ from whatsapp import (
     get_sender_name as whatsapp_get_sender_name,
 )
 from whatsapp import (
+    holds_message as whatsapp_holds_message,
+)
+from whatsapp import (
     list_chats as whatsapp_list_chats,
 )
 from whatsapp import (
@@ -119,9 +122,44 @@ SendingAccount = Annotated[
 ]
 
 
-def _account() -> Account:
-    # Until the tools learn which account to act on, they use the first one configured.
-    return accounts.registry().first()
+ReplyingAccount = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Name of the account (WhatsApp number) to send from, as listed by list_accounts. "
+            "Required when several accounts are configured, except for a reply: a reply goes out from the "
+            "account that holds the quoted message, and needs an account only when several or none hold it. "
+            "Ask the user which account to send from, never pick one yourself."
+        )
+    ),
+]
+
+
+ActingAccount = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Name of the account (WhatsApp number) to act through, as listed by list_accounts. "
+            "Omit to use the account that holds the message. Required only when several accounts hold it "
+            "(for example a message in a group two of your numbers are in) or none does: "
+            "then ask the user which account to use, never pick one yourself. "
+            "An account that doesn't hold the message is refused."
+        )
+    ),
+]
+
+
+def _holder(account: str | None, chat_jid: str, message_ids: list[str]) -> Account:
+    """The account an action on these messages goes through: the named one, or the one holding them."""
+    ids = [message_id.strip() for message_id in message_ids if message_id and message_id.strip()]
+    what = (
+        f"message{'s' if len(ids) > 1 else ''} {', '.join(repr(message_id) for message_id in ids)} in chat {chat_jid!r}"
+    )
+    return accounts.registry().holder(
+        account,
+        lambda target: any(whatsapp_holds_message(target, message_id, chat_jid) for message_id in ids),
+        what,
+    )
 
 
 def _tagged(account: Account, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -181,6 +219,13 @@ def _sent(account: Account, success: bool, message: str) -> dict[str, Any]:
         result["account"] = account.name
         result["account_phone_number"] = whatsapp_own_number(account)
     return result
+
+
+def _in_account(account: Account, result: dict[str, Any]) -> dict[str, Any]:
+    """Say which account's bridge and store a media or transcript result came from, once there are several."""
+    if not accounts.registry().several:
+        return result
+    return {**result, "account": account.name}
 
 
 def _located(account: Account, row: dict[str, Any], also_in: list[str]) -> dict[str, Any]:
@@ -681,12 +726,15 @@ def send_message(
     quoted_sender_jid: str = "",
     quoted_content: str = "",
     mentions: list[str] | None = None,
-    account: SendingAccount = None,
+    account: ReplyingAccount = None,
 ) -> dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
 
     With several accounts configured, `account` is required: ask the user which
-    account (number) to send from. A reply names its account too, for now.
+    account (number) to send from. A reply (quoted_message_id) goes out from the
+    account that holds the quoted message in this chat; it needs `account` only
+    when several accounts hold it or none does, and a named account that doesn't
+    hold it is refused.
 
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
@@ -702,13 +750,17 @@ def send_message(
                   ["420601234567"]) or JIDs. For each entry the message text must contain
                   a matching "@<number>" token (e.g. "hi @420601234567"), otherwise the
                   mention won't render on recipients' devices. Only meaningful in groups.
-        account: Account to send from (see list_accounts); required when several are configured
+        account: Account to send from (see list_accounts); required when several are configured,
+                 unless the quoted message is held by exactly one account
 
     Returns:
         A dictionary containing success status and a status message; with several
         accounts also `account` and `account_phone_number`, the number it went out from
     """
-    sender = accounts.registry().sender(account)
+    if quoted_message_id:
+        sender = _holder(account, recipient, [quoted_message_id])
+    else:
+        sender = accounts.registry().sender(account)
     # Validate input
     if not recipient:
         return _sent(sender, False, "Recipient must be provided")
@@ -727,8 +779,11 @@ def send_reaction(
     emoji: str,
     from_me: bool = False,
     sender_jid: str = "",
+    account: ActingAccount = None,
 ) -> dict[str, Any]:
     """Send (or remove) a reaction to a WhatsApp message.
+
+    The reaction comes from the account that holds the message in this chat.
 
     Args:
         recipient: The chat JID the message belongs to (e.g., "12025551234@s.whatsapp.net"
@@ -738,12 +793,15 @@ def send_reaction(
         from_me: Whether the original message was sent by the current user (default False)
         sender_jid: JID of the original message sender — required for group messages when
                     from_me is False so the bridge can build the correct WhatsApp key
+        account: Account to react from (see list_accounts); omit to use the one holding the message
 
     Returns:
-        A dictionary containing success status and a status message
+        A dictionary containing success status and a status message; with several
+        accounts also `account` and `account_phone_number`, the number it came from
     """
-    success, status_message = whatsapp_send_reaction(_account(), recipient, message_id, emoji, from_me, sender_jid)
-    return {"success": success, "message": status_message}
+    actor = _holder(account, recipient, [message_id])
+    success, status_message = whatsapp_send_reaction(actor, recipient, message_id, emoji, from_me, sender_jid)
+    return _sent(actor, success, status_message)
 
 
 @mcp.tool()
@@ -752,23 +810,28 @@ def mark_messages_read(
     chat_jid: str,
     sender_jid: str = "",
     timestamp: str | None = None,
+    account: ActingAccount = None,
 ) -> dict[str, Any]:
     """Mark selected WhatsApp messages as read and send read receipts.
 
     This is an explicit external side effect. All message IDs must belong to the
-    same chat and sender.
+    same chat and sender. The receipts come from the account that holds the
+    messages in this chat; if they are spread over several accounts, name one.
 
     Args:
         message_ids: IDs of the messages to mark as read
         chat_jid: JID of the chat containing the messages
         sender_jid: JID or bare phone number of the original sender; required for groups
         timestamp: Optional RFC 3339 read timestamp; defaults to the current time
+        account: Account to send the receipts from (see list_accounts); omit to use the one holding the messages
 
     Returns:
-        A dictionary containing success status and a status message
+        A dictionary containing success status and a status message; with several
+        accounts also `account` and `account_phone_number`, the number they came from
     """
-    success, status_message = whatsapp_mark_messages_read(_account(), message_ids, chat_jid, sender_jid, timestamp)
-    return {"success": success, "message": status_message}
+    actor = _holder(account, chat_jid, message_ids)
+    success, status_message = whatsapp_mark_messages_read(actor, message_ids, chat_jid, sender_jid, timestamp)
+    return _sent(actor, success, status_message)
 
 
 @mcp.tool()
@@ -821,22 +884,29 @@ def send_audio_message(recipient: str, media_path: str, account: SendingAccount 
 
 
 @mcp.tool()
-def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
+def download_media(message_id: str, chat_jid: str, account: ActingAccount = None) -> dict[str, Any]:
     """Download media from a WhatsApp message and get the local file path.
+
+    The bridge of the account that holds the message downloads it.
 
     Args:
         message_id: The ID of the message containing the media
         chat_jid: The JID of the chat containing the message
+        account: Account to download through (see list_accounts); omit to use the one holding the message
 
     Returns:
-        A dictionary containing success status, a status message, and the file path if successful
+        A dictionary containing success status, a status message, and the file path if successful;
+        with several accounts also `account`
     """
-    file_path = whatsapp_download_media(_account(), message_id, chat_jid)
+    holder = _holder(account, chat_jid, [message_id])
+    file_path = whatsapp_download_media(holder, message_id, chat_jid)
 
     if file_path:
-        return {"success": True, "message": "Media downloaded successfully", "file_path": file_path}
+        return _in_account(
+            holder, {"success": True, "message": "Media downloaded successfully", "file_path": file_path}
+        )
     else:
-        return {"success": False, "message": "Failed to download media"}
+        return _in_account(holder, {"success": False, "message": "Failed to download media"})
 
 
 @mcp.tool()
@@ -844,6 +914,7 @@ def view_media(
     message_id: str,
     chat_jid: str,
     max_dimension: PreviewDimension = media_preview.DEFAULT_MAX_DIMENSION,
+    account: ActingAccount = None,
 ) -> Any:
     """View the media of a WhatsApp message as an image.
 
@@ -852,36 +923,42 @@ def view_media(
     Videos return their first frame, which is enough to tell what was sent.
     Both are downscaled so a single photo cannot flood the context. Voice notes
     are not images — use transcribe_audio or read the transcript from the
-    message content with list_messages.
+    message content with list_messages. The bridge of the account that holds
+    the message downloads it.
 
     Args:
         message_id: The ID of the message containing the media
         chat_jid: The JID of the chat containing the message
         max_dimension: Longest edge of the returned image in pixels (default 1024)
+        account: Account to download through (see list_accounts); omit to use the one holding the message
 
     Returns:
-        Image content on success, otherwise a dictionary explaining why not
+        Image content on success, otherwise a dictionary explaining why not (with several
+        accounts also `account`)
     """
     try:
         media_preview.validate_max_dimension(max_dimension)
     except media_preview.PreviewError as exc:
         return {"success": False, "message": str(exc)}
 
-    file_path = whatsapp_download_media(_account(), message_id, chat_jid)
+    holder = _holder(account, chat_jid, [message_id])
+    file_path = whatsapp_download_media(holder, message_id, chat_jid)
     if not file_path:
-        return {"success": False, "message": "Failed to download media"}
+        return _in_account(holder, {"success": False, "message": "Failed to download media"})
 
     with tempfile.TemporaryDirectory() as work_dir:
         try:
             data, image_format = media_preview.render_preview(file_path, max_dimension=max_dimension, work_dir=work_dir)
         except media_preview.PreviewError as exc:
-            return {"success": False, "message": str(exc), "file_path": file_path}
+            return _in_account(holder, {"success": False, "message": str(exc), "file_path": file_path})
 
     return Image(data=data, format=image_format)
 
 
 @mcp.tool()
-def transcribe_audio(message_id: str, chat_jid: str, force: bool = False) -> dict[str, Any]:
+def transcribe_audio(
+    message_id: str, chat_jid: str, force: bool = False, account: ActingAccount = None
+) -> dict[str, Any]:
     """Transcribe a WhatsApp voice note and return its text.
 
     Runs whisper.cpp locally by default, or sends audio to the operator's
@@ -894,15 +971,23 @@ def transcribe_audio(message_id: str, chat_jid: str, force: bool = False) -> dic
     whisper.cpp, FFmpeg, and WHISPER_MODEL for the default provider; alternatively
     configure WHATSAPP_TRANSCRIPTION_PROVIDER=openai_compatible, URL and MODEL.
 
+    The account that holds the message downloads the audio, and the transcript
+    is read from and stored in that account's messages store only.
+
     Args:
         message_id: The ID of the message containing the voice note
         chat_jid: The JID of the chat containing the message
         force: Transcribe again even when a transcript is already stored
+        account: Account holding the voice note (see list_accounts); omit to use the one holding it
 
     Returns:
-        A dictionary with success status and the transcript
+        A dictionary with success status and the transcript; with several accounts also `account`
     """
-    account = _account()
+    holder = _holder(account, chat_jid, [message_id])
+    return _in_account(holder, _transcribe(holder, message_id, chat_jid, force))
+
+
+def _transcribe(account: Account, message_id: str, chat_jid: str, force: bool) -> dict[str, Any]:
     if not force:
         existing = transcription.stored_transcript(account.messages_db_path, message_id, chat_jid)
         if existing:
