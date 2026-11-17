@@ -99,6 +99,10 @@ class Contact:
     jid: str
 
 
+class MessageNotFoundError(ValueError):
+    """The account's store has no message with this ID."""
+
+
 @dataclass
 class MessageContext:
     message: Message
@@ -660,7 +664,7 @@ def get_message_context(account: Account, message_id: str, before: int = 5, afte
         msg_data = cursor.fetchone()
 
         if not msg_data:
-            raise ValueError(f"Message with ID {message_id} not found")
+            raise MessageNotFoundError(f"Message with ID {message_id} not found")
 
         target_message = Message(
             timestamp=datetime.fromisoformat(msg_data[0]),
