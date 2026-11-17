@@ -143,7 +143,7 @@ ActingAccount = Annotated[
             "Omit to use the account that holds the message. Required only when several accounts hold it "
             "(for example a message in a group two of your numbers are in) or none does: "
             "then ask the user which account to use, never pick one yourself. "
-            "An account that doesn't hold the message is refused."
+            "An account that doesn't hold the message is refused when another account holds it."
         )
     ),
 ]
@@ -152,13 +152,11 @@ ActingAccount = Annotated[
 def _holder(account: str | None, chat_jid: str, message_ids: list[str]) -> Account:
     """The account an action on these messages goes through: the named one, or the one holding them."""
     ids = [message_id.strip() for message_id in message_ids if message_id and message_id.strip()]
-    what = (
-        f"message{'s' if len(ids) > 1 else ''} {', '.join(repr(message_id) for message_id in ids)} in chat {chat_jid!r}"
-    )
     return accounts.registry().holder(
         account,
-        lambda target: any(whatsapp_holds_message(target, message_id, chat_jid) for message_id in ids),
-        what,
+        lambda target, message_id: whatsapp_holds_message(target, message_id, chat_jid),
+        ids,
+        f"in chat {chat_jid!r}",
     )
 
 
@@ -734,7 +732,7 @@ def send_message(
     account (number) to send from. A reply (quoted_message_id) goes out from the
     account that holds the quoted message in this chat; it needs `account` only
     when several accounts hold it or none does, and a named account that doesn't
-    hold it is refused.
+    hold it is refused when another one does.
 
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,

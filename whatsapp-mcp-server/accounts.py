@@ -14,7 +14,7 @@ WHATSAPP_BRIDGE_TOKEN), so existing setups keep working unchanged.
 import json
 import os
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -132,41 +132,72 @@ class Registry:
                 continue
         return tuple(found)
 
-    def holder(self, name: str | None, holds: Callable[[Account], bool], what: str) -> Account:
-        """The account an action on an existing message goes through: the one that holds it.
+    def holder(
+        self, name: str | None, holds: Callable[[Account, str], bool], message_ids: Sequence[str], where: str
+    ) -> Account:
+        """The account an action on existing messages goes through: the one that holds them.
 
         With one account nothing is looked up and that account acts, as it always
-        did. With several, the message locator decides: a message held by one
-        account uses it; held by several (a message in a group two of the user's
-        numbers are in) or by none, the account must be named.
-        A named account is used only if it holds the message or no account does.
-        `what` names the message in errors.
+        did. With several, the message locator decides, message by message:
+        messages held by one account use it; messages that several accounts hold
+        (a message in a group two of the user's numbers are in) or that no account
+        holds need the account named. Messages held by different accounts are
+        refused: no single account can act on all of them.
+        A named account is used only if it holds every message that some account holds.
+        holds(account, message_id) checks one store; `where` names the chat in errors.
 
         Raises:
             ValueError: when the account can't be decided or the named one doesn't
-                hold the message; each says which accounts can be named.
+                hold a message; each says which accounts can be named.
         """
         named = self.get(name) if name else None
         if not self.several:
             return named or self.first()
-        held_by = self.locate(holds)
-        holders = ", ".join(account.name for account in held_by)
+        located = {}
+        for message_id in message_ids:
+            held_by = self.locate(lambda account, message_id=message_id: holds(account, message_id))
+            if held_by:
+                located[message_id] = held_by
         if named:
-            if held_by and named not in held_by:
-                raise ValueError(f"Account {named.name!r} does not hold {what}; it is held by: {holders}")
+            for message_id, held_by in located.items():
+                if named not in held_by:
+                    raise ValueError(
+                        f"Account {named.name!r} does not hold message {message_id!r} {where}; "
+                        f"it is held by: {_names(held_by)}"
+                    )
             return named
-        if len(held_by) == 1:
-            return held_by[0]
-        if held_by:
+        unheld = [message_id for message_id in message_ids if message_id not in located]
+        if unheld or not located:
             raise ValueError(
-                f"{what[0].upper()}{what[1:]} is held by several accounts: {holders}; "
-                "ask the user which one to act from and pass it as account"
+                f"No account holds {_messages(unheld)} {where}; ask the user which account to act from "
+                f"and pass it as account; valid accounts: {_names(self.accounts)}"
             )
-        valid = ", ".join(account.name for account in self.accounts)
+        common = [account for account in self.accounts if all(account in held_by for held_by in located.values())]
+        if len(common) == 1:
+            return common[0]
+        if common:
+            what = _messages(list(located))
+            raise ValueError(
+                f"{what[0].upper()}{what[1:]} {where} {'are' if len(located) > 1 else 'is'} held by several "
+                f"accounts: {_names(common)}; ask the user which one to act from and pass it as account"
+            )
+        spread = ", ".join(f"{message_id!r} by {_names(held_by)}" for message_id, held_by in located.items())
         raise ValueError(
-            f"No account holds {what}; ask the user which account to act from and pass it as account; "
-            f"valid accounts: {valid}"
+            f"Messages {where} are held by different accounts: {spread}; "
+            "act on each account's messages in a separate call"
         )
+
+
+def _names(accounts: Sequence[Account]) -> str:
+    return ", ".join(account.name for account in accounts)
+
+
+def _messages(message_ids: Sequence[str]) -> str:
+    """How errors name some messages: "message 'a'" or "messages 'a', 'b'"."""
+    if not message_ids:
+        return "the messages"
+    plural = "s" if len(message_ids) > 1 else ""
+    return f"message{plural} {', '.join(repr(message_id) for message_id in message_ids)}"
 
 
 def _default_account(environ: Mapping[str, str]) -> Account:

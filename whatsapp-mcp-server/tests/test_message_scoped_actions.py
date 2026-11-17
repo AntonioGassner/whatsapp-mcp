@@ -237,12 +237,27 @@ def test_account_with_a_missing_store_is_skipped_when_locating(tmp_path, stores,
     assert _reached(bridge) == [_at("work", "/react")]
 
 
-def test_receipts_for_messages_held_by_different_accounts_need_an_account(two_accounts):
+def test_receipts_for_messages_held_by_different_accounts_are_refused(two_accounts):
     # Each account could only mark its own message read; neither can be picked for both.
-    with pytest.raises(ValueError, match="held by several accounts: personal, work"):
+    with pytest.raises(ValueError, match="held by different accounts: 'gp' by personal, 'gw' by work"):
         main.mark_messages_read(["gp", "gw"], GROUP, ALICE)
 
     assert two_accounts.calls == []
+
+
+@pytest.mark.parametrize(("account", "foreign"), [("personal", "gw"), ("work", "gp")])
+def test_receipts_naming_an_account_that_holds_only_some_of_the_messages_are_refused(two_accounts, account, foreign):
+    with pytest.raises(ValueError, match=f"Account '{account}' does not hold message '{foreign}'"):
+        main.mark_messages_read(["gp", "gw"], GROUP, ALICE, account=account)
+
+    assert two_accounts.calls == []
+
+
+def test_receipts_for_several_messages_of_one_account_go_to_its_bridge(two_accounts):
+    main.mark_messages_read(["p1", "zz"], ALICE, ALICE, account="personal")
+    main.mark_messages_read(["gp", "g1"], GROUP, ALICE)
+
+    assert _reached(two_accounts) == [_at("personal", "/mark-read"), _at("personal", "/mark-read")]
 
 
 @pytest.mark.parametrize(

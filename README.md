@@ -251,7 +251,7 @@ automatically.
 - `chat_jid` (required): JID of the chat containing the messages
 - `sender_jid` (required for groups): Full JID or bare phone number of the original message sender
 - `timestamp` (optional): RFC 3339 read timestamp; defaults to the current time
-- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused while another account does
 
 **Natural Language Examples:**
 
@@ -269,7 +269,7 @@ Send (or remove) an emoji reaction to a message.
 - `emoji` (required): Reaction emoji (e.g. `"👍"`). Pass an empty string `""` to remove an existing reaction.
 - `from_me` (optional, default `false`): Whether the original message was sent by the current user
 - `sender_jid` (optional): Full JID of the original message sender — required for group messages when `from_me` is `false` so the correct WhatsApp key is built
-- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused while another account does
 
 Inbound reactions received from others are stored automatically as messages with `media_type = "reaction"`. The `reaction_to_message_id` field in each reaction message indicates which message was reacted to.
 
@@ -341,7 +341,7 @@ only helps a client that can read the filesystem — use `view_media` otherwise.
 
 - `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
-- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused while another account does
 
 #### `view_media`
 
@@ -359,7 +359,7 @@ below 4 MB are returned unchanged and anything else reports what is missing.
 - `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
 - `max_dimension` (optional): longest edge in pixels, default `1024`
-- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused while another account does
 
 `max_dimension` must be an integer from `1` to `2048`. Invalid values are
 rejected before the server downloads or renders any media.
@@ -412,7 +412,7 @@ Cache reads and writes use both message ID and chat JID.
 - `message_id` (required): ID of the message with the voice note
 - `chat_jid` (required): JID of the chat containing the message
 - `force` (optional): transcribe again even when a transcript is stored
-- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused while another account does
 
 ### Chat Operations
 
@@ -826,7 +826,9 @@ each store under the other number's chat, so the chat tells the two sides
 apart. When several accounts hold the message (one in a group two of your
 numbers are in), `account` is required and the error names those accounts; when
 none does, `account` is required and the error lists the valid names. Naming an
-account that doesn't hold the message is refused. Nothing reaches a bridge
+account is refused when another account holds the message and the named one
+doesn't, and `mark_messages_read` refuses messages held by different accounts:
+mark each account's messages in a separate call. Nothing reaches a bridge
 until the account is settled, and the call goes to that account's bridge with
 that account's token. Reactions, receipts and replies report `account` and
 `account_phone_number`; media and transcript results report `account`. A
