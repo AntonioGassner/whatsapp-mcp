@@ -37,7 +37,9 @@ def test_negative_pagination_is_clamped(monkeypatch, tool, captured_attr, cap):
 def test_get_contact_chats_clamps_pagination(monkeypatch):
     seen = {}
     monkeypatch.setattr(
-        mcp_main, "whatsapp_get_contact_chats", lambda jid, limit, page: seen.update(limit=limit, page=page) or []
+        mcp_main,
+        "whatsapp_get_contact_chats",
+        lambda account, jid, limit, page: seen.update(limit=limit, page=page) or [],
     )
     mcp_main.get_contact_chats("x@s.whatsapp.net", limit=-5, page=-1)
     assert seen == {"limit": 1, "page": 0}

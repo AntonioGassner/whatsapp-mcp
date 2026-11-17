@@ -12,6 +12,7 @@ import sqlite3
 import pytest
 
 import whatsapp
+from tests.conftest import first_account, use_default_account
 
 CHATS = [
     # (jid, name, last_message_time, last_read_time, last message is_from_me)
@@ -88,7 +89,7 @@ def _make_db(path, *, with_read_state: bool):
 def read_state_db(tmp_path, monkeypatch):
     db_path = tmp_path / "messages.db"
     _make_db(str(db_path), with_read_state=True)
-    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(db_path))
+    use_default_account(monkeypatch, WHATSAPP_DB_PATH=str(db_path))
     return db_path
 
 
@@ -96,13 +97,15 @@ def read_state_db(tmp_path, monkeypatch):
 def legacy_db(tmp_path, monkeypatch):
     db_path = tmp_path / "legacy.db"
     _make_db(str(db_path), with_read_state=False)
-    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(db_path))
+    use_default_account(monkeypatch, WHATSAPP_DB_PATH=str(db_path))
     return db_path
 
 
 @pytest.mark.parametrize("include_last_message", [True, False])
 def test_list_chats_exposes_read_state(read_state_db, include_last_message):
-    chats = {c["jid"]: c for c in whatsapp.list_chats(limit=10, include_last_message=include_last_message)}
+    chats = {
+        c["jid"]: c for c in whatsapp.list_chats(first_account(), limit=10, include_last_message=include_last_message)
+    }
 
     assert chats["unread@s.whatsapp.net"]["last_read_time"] == "2024-01-15T09:00:00+00:00"
     assert chats["unread@s.whatsapp.net"]["unread"] is True
@@ -119,23 +122,23 @@ def test_list_chats_exposes_read_state(read_state_db, include_last_message):
 
 @pytest.mark.parametrize("include_last_message", [True, False])
 def test_get_chat_exposes_read_state(read_state_db, include_last_message):
-    chat = whatsapp.get_chat("read@s.whatsapp.net", include_last_message=include_last_message)
+    chat = whatsapp.get_chat(first_account(), "read@s.whatsapp.net", include_last_message=include_last_message)
     assert chat["last_read_time"] == "2024-01-15T11:00:00+00:00"
     assert chat["unread"] is False
 
-    chat = whatsapp.get_chat("unread@s.whatsapp.net", include_last_message=include_last_message)
+    chat = whatsapp.get_chat(first_account(), "unread@s.whatsapp.net", include_last_message=include_last_message)
     assert chat["last_read_time"] == "2024-01-15T09:00:00+00:00"
     assert chat["unread"] is True
 
 
 def test_get_direct_chat_by_contact_exposes_read_state(read_state_db):
-    chat = whatsapp.get_direct_chat_by_contact("unread")
+    chat = whatsapp.get_direct_chat_by_contact(first_account(), "unread")
     assert chat["last_read_time"] == "2024-01-15T09:00:00+00:00"
     assert chat["unread"] is True
 
 
 def test_get_contact_chats_exposes_read_state(read_state_db):
-    chats = whatsapp.get_contact_chats("read@s.whatsapp.net")
+    chats = whatsapp.get_contact_chats(first_account(), "read@s.whatsapp.net")
     chat = next(c for c in chats if c["jid"] == "read@s.whatsapp.net")
     assert chat["last_read_time"] == "2024-01-15T11:00:00+00:00"
     assert chat["unread"] is False
@@ -143,13 +146,13 @@ def test_get_contact_chats_exposes_read_state(read_state_db):
 
 def test_reads_work_against_store_without_read_state_column(legacy_db):
     """A messages.db from a bridge older than the migration must still read."""
-    chats = {c["jid"]: c for c in whatsapp.list_chats(limit=10)}
+    chats = {c["jid"]: c for c in whatsapp.list_chats(first_account(), limit=10)}
     assert len(chats) == len(CHATS)
     assert all(c["last_read_time"] is None for c in chats.values())
     assert chats["unread@s.whatsapp.net"]["unread"] is True
     assert chats["mine@s.whatsapp.net"]["unread"] is False
 
-    chat = whatsapp.get_chat("read@s.whatsapp.net")
+    chat = whatsapp.get_chat(first_account(), "read@s.whatsapp.net")
     assert chat["last_read_time"] is None
     assert chat["unread"] is True
 
@@ -170,9 +173,9 @@ def test_list_chats_dedupes_timestamp_ties(tmp_path, monkeypatch):
     )
     conn.commit()
     conn.close()
-    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(db_path))
+    use_default_account(monkeypatch, WHATSAPP_DB_PATH=str(db_path))
 
-    chats = whatsapp.list_chats(limit=10, include_last_message=False)
+    chats = whatsapp.list_chats(first_account(), limit=10, include_last_message=False)
     assert len(chats) == 1
     # Deterministic tie-break prefers higher id ('zzz'), which is from_me.
     assert chats[0]["last_is_from_me"] == 1
