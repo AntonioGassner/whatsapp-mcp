@@ -94,6 +94,22 @@ def test_paging_across_accounts_returns_every_message_exactly_once(two_accounts,
     assert len(everything) == 6
 
 
+@pytest.mark.parametrize("sort_by", ["newest", "oldest"])
+@pytest.mark.parametrize("limit", [1, 2, 3, 4])
+def test_paging_is_stable_when_messages_share_a_timestamp(two_accounts, sort_by, limit):
+    personal, work = two_accounts
+    tied = _at(6)
+    _fill(personal, chats=[], messages=[(f"pt{i}", ALICE, ALICE, f"tied {i}", tied) for i in range(5)])
+    _fill(work, chats=[], messages=[(f"wt{i}", BOB, BOB, f"tied {i}", tied) for i in range(5)])
+
+    paged = []
+    for page in range(16 // limit + 1):
+        paged += _ids(main.list_messages(include_context=False, sort_by=sort_by, limit=limit, page=page))
+
+    assert len(paged) == 16
+    assert len(set(paged)) == 16
+
+
 def test_list_messages_context_comes_from_the_account_of_each_match(two_accounts):
     rows = main.list_messages(query="invoice")
 
