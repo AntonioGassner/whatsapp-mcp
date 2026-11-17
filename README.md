@@ -172,6 +172,7 @@ Search contacts by name or phone number.
 **Parameters:**
 
 - `query` (required): Name or phone number to search
+- `account` (optional): Account name from `list_accounts`; omit to search every account. A person known on two accounts is listed once per account
 
 **Natural Language Examples:**
 
@@ -207,6 +208,7 @@ Get messages with filters, date ranges, and sorting.
 - `before_date` (optional): Messages before this date (YYYY-MM-DD)
 - `after_date` (optional): Messages after this date (YYYY-MM-DD)
 - `sort_by` (optional): "newest" or "oldest" (default "newest")
+- `account` (optional): Account name from `list_accounts`; omit to search every account. Matches from every account are merged into one list in the `sort_by` order, and paging applies to the merged list
 
 **Natural Language Examples:**
 
@@ -448,6 +450,7 @@ List all chats with metadata.
 **Parameters:**
 
 - `limit` (optional): Number of chats (default 50, max 200)
+- `account` (optional): Account name from `list_accounts`; omit to list every account. Chats from every account are merged by last activity (or name), and a chat that exists in two accounts is listed once per account
 
 #### `get_chat`
 
@@ -472,6 +475,7 @@ List all chats involving a specific contact.
 **Parameters:**
 
 - `phone` (required): Phone number of the contact
+- `account` (optional): Account name from `list_accounts`; omit to search every account. Chats from every account are merged by last activity
 
 #### `get_last_interaction`
 
@@ -779,9 +783,16 @@ With an accounts file, `WHATSAPP_DB_PATH`, `WHATSMEOW_DB_PATH`,
 server serves a single account named `default` built from those settings,
 exactly as before.
 
-Use `list_accounts` to check each account's number and bridge. The other tools
-currently act on the first account in the file; reading across all accounts and
-choosing the account a message goes out from are being added.
+Use `list_accounts` to check each account's number and bridge.
+
+`list_messages`, `list_chats`, `search_contacts` and `get_contact_chats` read
+every account unless you pass `account`. Results from all accounts are merged
+in the tool's usual order and paged after merging, and each message, chat and
+contact carries an `account` field naming the account it came from. An account
+whose `messages.db` is missing is skipped; naming it fails with the missing
+store. An unknown account name is refused with the list of valid names. The
+other tools currently act on the first account in the file; lookups across
+accounts and choosing the account a message goes out from are being added.
 
 ### Run automatically on macOS
 

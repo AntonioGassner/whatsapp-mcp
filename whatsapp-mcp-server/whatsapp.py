@@ -505,6 +505,37 @@ def list_messages(
         List of message dictionaries with id, timestamp, sender, content, etc.
     """
     try:
+        matches = find_messages(
+            account,
+            after=after,
+            before=before,
+            sender_phone_number=sender_phone_number,
+            chat_jid=chat_jid,
+            query=query,
+            limit=limit,
+            page=page,
+            sort_by=sort_by,
+        )
+        rows = with_context([(account, msg) for msg in matches], include_context, context_before, context_after)
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        return []
+    return [msg_to_dict(account, msg) for _, msg in rows]
+
+
+def find_messages(
+    account: Account,
+    after: str | None = None,
+    before: str | None = None,
+    sender_phone_number: str | None = None,
+    chat_jid: str | None = None,
+    query: str | None = None,
+    limit: int = 20,
+    page: int = 0,
+    sort_by: str = "newest",
+) -> list[Message]:
+    """The messages list_messages matches, in its order, without context."""
+    try:
         conn = _connect_messages_db(account)
         cursor = conn.cursor()
 
@@ -579,29 +610,7 @@ def list_messages(
                 filename=msg[9] if len(msg) > 9 else None,
             )
             result.append(message)
-
-        if include_context and result:
-            # Add context for each message, deduplicated by message ID
-            seen_ids = set()
-            messages_with_context = []
-            for msg in result:
-                context = get_message_context(account, msg.id, context_before, context_after)
-                for ctx_msg in context.before:
-                    if ctx_msg.id not in seen_ids:
-                        seen_ids.add(ctx_msg.id)
-                        messages_with_context.append(ctx_msg)
-                if context.message.id not in seen_ids:
-                    seen_ids.add(context.message.id)
-                    messages_with_context.append(context.message)
-                for ctx_msg in context.after:
-                    if ctx_msg.id not in seen_ids:
-                        seen_ids.add(ctx_msg.id)
-                        messages_with_context.append(ctx_msg)
-
-            return [msg_to_dict(account, msg) for msg in messages_with_context]
-
-        # Return messages without context
-        return [msg_to_dict(account, msg) for msg in result]
+        return result
 
     except sqlite3.Error as e:
         print(f"Database error: {e}")
@@ -609,6 +618,27 @@ def list_messages(
     finally:
         if "conn" in locals():
             conn.close()
+
+
+def with_context(
+    matches: list[tuple[Account, Message]], include_context: bool, context_before: int, context_after: int
+) -> list[tuple[Account, Message]]:
+    """Surround each match with its neighbours from the same chat and account, listing each message once.
+
+    Raises:
+        sqlite3.Error: when an account's database can't be read.
+    """
+    if not include_context:
+        return matches
+    seen: set[tuple[str, str]] = set()
+    rows = []
+    for account, msg in matches:
+        context = get_message_context(account, msg.id, context_before, context_after)
+        for ctx_msg in (*context.before, context.message, *context.after):
+            if (account.name, ctx_msg.id) not in seen:
+                seen.add((account.name, ctx_msg.id))
+                rows.append((account, ctx_msg))
+    return rows
 
 
 def get_message_context(account: Account, message_id: str, before: int = 5, after: int = 5) -> MessageContext:

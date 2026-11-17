@@ -71,6 +71,32 @@ class Registry:
     def first(self) -> Account:
         return self.accounts[0]
 
+    @property
+    def several(self) -> bool:
+        """Whether results must say which account they came from."""
+        return len(self.accounts) > 1
+
+    def get(self, name: str) -> Account:
+        """The account with this name.
+
+        Raises:
+            ValueError: naming the valid accounts, so a typo isn't read as "nothing found".
+        """
+        for account in self.accounts:
+            if account.name == name:
+                return account
+        valid = ", ".join(account.name for account in self.accounts)
+        raise ValueError(f"Unknown account {name!r}; valid accounts: {valid}")
+
+    def select(self, name: str | None) -> tuple[Account, ...]:
+        """The accounts a read covers: the named one, or every account when no name is given.
+
+        An empty name counts as no name: clients often send "" for an omitted string.
+        """
+        if not name:
+            return self.accounts
+        return (self.get(name),)
+
 
 def _default_account(environ: Mapping[str, str]) -> Account:
     return Account(
