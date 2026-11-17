@@ -97,6 +97,26 @@ class Registry:
             return self.accounts
         return (self.get(name),)
 
+    def sender(self, name: str | None) -> Account:
+        """The account a new message goes out from: the named one, or the only one.
+
+        With several accounts no account is ever chosen by default: sending from
+        the wrong number can't be taken back.
+
+        Raises:
+            ValueError: when several accounts are configured and none is named, or the
+                name is unknown; both list the valid names.
+        """
+        if name:
+            return self.get(name)
+        if self.several:
+            valid = ", ".join(account.name for account in self.accounts)
+            raise ValueError(
+                f"Several accounts are configured; ask the user which one to send from and pass it as account; "
+                f"valid accounts: {valid}"
+            )
+        return self.first()
+
 
 def _default_account(environ: Mapping[str, str]) -> Account:
     return Account(
