@@ -188,6 +188,7 @@ Resolve a WhatsApp contact name from a phone number, LID, or full JID.
 
 - `identifier` (required): Phone number, LID, or full JID (aliases: `phone_number`, `phone`)
   - Examples: `12025551234`, `184125298348272`, `12025551234@s.whatsapp.net`, `184125298348272@lid`
+- `account` (optional): Account name from `list_accounts`; omit to look in every account. When several accounts know the contact, the one whose chat with it was most recently active is returned and `also_in_accounts` names the others
 
 **Natural Language Examples:**
 
@@ -459,6 +460,7 @@ Get specific chat metadata by JID.
 **Parameters:**
 
 - `jid` (required): Chat JID
+- `account` (optional): Account name from `list_accounts`; omit to look in every account. When several accounts have the chat, the most recently active one is returned and `also_in_accounts` names the others
 
 #### `get_direct_chat_by_contact`
 
@@ -467,6 +469,7 @@ Find a direct message chat with a contact.
 **Parameters:**
 
 - `phone` (required): Phone number of the contact
+- `account` (optional): Account name from `list_accounts`; omit to look in every account. When several accounts have the chat, the most recently active one is returned and `also_in_accounts` names the others
 
 #### `get_contact_chats`
 
@@ -484,6 +487,7 @@ Get the last message exchanged with a contact.
 **Parameters:**
 
 - `phone` (required): Phone number of the contact
+- `account` (optional): Account name from `list_accounts`; omit to look in every account. When several accounts have messages with the contact, the newest message is returned and `also_in_accounts` names the others
 
 #### `get_message_context`
 
@@ -495,6 +499,7 @@ Get messages around a specific message for context.
 - `chat_jid` (required): JID of the chat
 - `before` (optional): Number of messages before (default 5)
 - `after` (optional): Number of messages after (default 5)
+- `account` (optional): Account name from `list_accounts`; omit to look in every account. When several accounts hold the message (a message between two of your numbers is in both stores), the one whose chat was most recently active is returned and `also_in_accounts` names the others
 
 ## Configuration
 
@@ -790,9 +795,18 @@ every account unless you pass `account`. Results from all accounts are merged
 in the tool's usual order and paged after merging, and each message, chat and
 contact carries an `account` field naming the account it came from. An account
 whose `messages.db` is missing is skipped; naming it fails with the missing
-store. An unknown account name is refused with the list of valid names. The
-other tools currently act on the first account in the file; lookups across
-accounts and choosing the account a message goes out from are being added.
+store. An unknown account name is refused with the list of valid names.
+
+`get_chat`, `get_contact`, `get_direct_chat_by_contact`, `get_last_interaction`
+and `get_message_context` also look in every account unless you pass
+`account`, and keep their usual result. When the item is in several accounts
+(for example a message between two of your own numbers, which both stores
+hold), the match from the most recently active account is returned, tagged
+with its `account`, and `also_in_accounts` names the others.
+
+The send, reaction, read-receipt and media tools currently act on the first
+account in the file; choosing the account a message goes out from is being
+added.
 
 ### Run automatically on macOS
 

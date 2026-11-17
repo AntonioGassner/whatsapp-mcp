@@ -16,6 +16,12 @@ from accounts import Account
 from mcp_config import resolve_host, resolve_port, resolve_transport
 from parent_watchdog import install_stdio_parent_watchdog
 from whatsapp import (
+    Message,
+    MessageContext,
+    MessageNotFoundError,
+    msg_to_dict,
+)
+from whatsapp import (
     connection_status as whatsapp_connection_status,
 )
 from whatsapp import (
@@ -50,9 +56,6 @@ from whatsapp import (
 )
 from whatsapp import (
     mark_messages_read as whatsapp_mark_messages_read,
-)
-from whatsapp import (
-    msg_to_dict,
 )
 from whatsapp import (
     own_number as whatsapp_own_number,
@@ -134,6 +137,39 @@ def _read_each(targets: tuple[Account, ...], read: Callable[[Account], list[T]])
     if not results and missing:
         raise missing
     return results
+
+
+def _look_up(
+    targets: tuple[Account, ...], read: Callable[[Account], T | None], activity: Callable[[Account, T], Any]
+) -> tuple[Account, T, list[str]] | None:
+    """Find one item in the target accounts; read(account) returns it, or None where it isn't held.
+
+    Returns the match from the account where activity(account, item) is most
+    recent, and the names of the other accounts that also hold it; None when no
+    account does. Ties keep the accounts' order. Missing stores are skipped as
+    in _read_each.
+    """
+
+    def read_one(target: Account) -> list[T]:
+        item = read(target)
+        return [] if item is None else [item]
+
+    found = [(target, items[0]) for target, items in _read_each(targets, read_one) if items]
+    if not found:
+        return None
+    # A single match needs no activity, which may cost another read.
+    target, item = found[0] if len(found) == 1 else max(found, key=lambda match: _instant(activity(*match)))
+    return target, item, [other.name for other, _ in found if other is not target]
+
+
+def _located(account: Account, row: dict[str, Any], also_in: list[str]) -> dict[str, Any]:
+    """Say which account a lookup's match came from, and which other accounts also hold it."""
+    if not accounts.registry().several:
+        return row
+    row = {**row, "account": account.name}
+    if also_in:
+        row["also_in_accounts"] = also_in
+    return row
 
 
 def _merged_page(
@@ -224,15 +260,60 @@ def search_contacts(query: str, account: AccountName = None) -> list[dict[str, A
     return [row for target, contacts in per_account for row in _tagged(target, contacts)]
 
 
+def _contact_in(
+    account: Account, identifier: str, candidates: list[tuple[str, bool]]
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """get_contact's answer from one account, with the chat it was found by (None if no chat matched)."""
+    jid, is_lid = candidates[0]
+    jid_user = jid.split("@", 1)[0]
+
+    display_name: str | None = None
+    resolved = False
+
+    # Prefer chats table lookup via get_chat (works for both phone and LID contacts).
+    chat = None
+    for candidate_jid, candidate_is_lid in candidates:
+        chat = whatsapp_get_chat(account, candidate_jid, include_last_message=False)
+        if chat:
+            jid = candidate_jid
+            is_lid = candidate_is_lid
+            jid_user = jid.split("@", 1)[0]
+            break
+
+    if chat and chat.get("name"):
+        display_name = chat["name"]
+        resolved = display_name not in (jid, jid_user)
+    else:
+        # Fallback: best-effort sender-name resolution (may use fuzzy LIKE lookup).
+        display_name = whatsapp_get_sender_name(account, jid)
+        resolved = display_name not in (jid, jid_user, identifier)
+
+    contact = {
+        "identifier": identifier,
+        "jid": jid,
+        "phone_number": jid_user if not is_lid else None,
+        "lid": jid_user if is_lid else None,
+        "name": display_name if resolved else jid_user,
+        "display_name": display_name,
+        "is_lid": is_lid,
+        "resolved": resolved,
+    }
+    return contact, chat
+
+
 @mcp.tool()
 def get_contact(
     identifier: str | None = None,
     phone_number: str | None = None,
     phone: str | None = None,
+    account: AccountName = None,
 ) -> dict[str, Any]:
     """Look up a WhatsApp contact by phone number, LID, or full JID.
 
     Automatically detects the identifier type and queries appropriately.
+    Looks in every account unless one is named. When several accounts know the
+    contact, the one whose chat with it was most recently active is returned and
+    `also_in_accounts` names the others.
 
     Args:
         identifier: Phone number, LID, or full JID. Examples:
@@ -242,9 +323,12 @@ def get_contact(
                     - "184125298348272@lid" (LID JID)
         phone_number: Backward-compatible alias for `identifier`.
         phone: Backward-compatible alias for `identifier` (matches README parameter name).
+        account: Account to look in (see list_accounts); omit to look in every account
 
     Returns:
-        Dictionary with jid, name, display_name, is_lid, and resolved status
+        Dictionary with jid, name, display_name, is_lid, and resolved status. A
+        contact no account knows (no chat with it, no name for it) carries no
+        `account` field.
     """
     if identifier is None:
         identifier = phone_number
@@ -276,44 +360,30 @@ def get_contact(
             jid = identifier
             is_lid = False
 
-    jid_user = jid.split("@", 1)[0]
-
-    display_name: str | None = None
-    resolved = False
-
-    # Prefer chats table lookup via get_chat (works for both phone and LID contacts).
     candidates: list[tuple[str, bool]] = [(jid, is_lid)]
     if bare_numeric_digits:
         candidates.append((f"{bare_numeric_digits}@lid", True))
 
-    account = _account()
-    chat = None
-    for candidate_jid, candidate_is_lid in candidates:
-        chat = whatsapp_get_chat(account, candidate_jid, include_last_message=False)
-        if chat:
-            jid = candidate_jid
-            is_lid = candidate_is_lid
-            jid_user = jid.split("@", 1)[0]
-            break
+    # An account knows the contact when it has a chat with it or can name it;
+    # when none does, the first account's unresolved answer is returned.
+    unknown: list[dict[str, Any]] = []
 
-    if chat and chat.get("name"):
-        display_name = chat["name"]
-        resolved = display_name not in (jid, jid_user)
-    else:
-        # Fallback: best-effort sender-name resolution (may use fuzzy LIKE lookup).
-        display_name = whatsapp_get_sender_name(account, jid)
-        resolved = display_name not in (jid, jid_user, identifier)
+    def known_in(target: Account) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
+        contact, chat = _contact_in(target, identifier, candidates)
+        if chat or contact["resolved"]:
+            return contact, chat
+        unknown.append(contact)
+        return None
 
-    return {
-        "identifier": identifier,
-        "jid": jid,
-        "phone_number": jid_user if not is_lid else None,
-        "lid": jid_user if is_lid else None,
-        "name": display_name if resolved else jid_user,
-        "display_name": display_name,
-        "is_lid": is_lid,
-        "resolved": resolved,
-    }
+    match = _look_up(
+        accounts.registry().select(account),
+        known_in,
+        lambda target, found: _last_active(target, found[1] or {}),
+    )
+    if match is None:
+        return unknown[0]
+    target, (contact, _chat), also_in = match
+    return _located(target, contact, also_in)
 
 
 @mcp.tool()
@@ -441,30 +511,53 @@ def list_chats(
     )
 
 
+def _last_active(_account: Account, chat: dict[str, Any]) -> str | None:
+    return chat.get("last_message_time")
+
+
 @mcp.tool()
-def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]:
+def get_chat(chat_jid: str, include_last_message: bool = True, account: AccountName = None) -> dict[str, Any]:
     """Get WhatsApp chat metadata by JID.
+
+    Looks in every account unless one is named. When several accounts have the
+    chat, the most recently active one is returned and `also_in_accounts` names
+    the others.
 
     Args:
         chat_jid: The JID of the chat to retrieve
         include_last_message: Whether to include the last message (default True)
+        account: Account to look in (see list_accounts); omit to look in every account
 
     Returns:
-        Chat dictionary — same shape as list_chats, including last_read_time and unread.
+        Chat dictionary — same shape as list_chats, including last_read_time and unread —
+        or null if no account has the chat.
     """
-    chat = whatsapp_get_chat(_account(), chat_jid, include_last_message)
-    return chat
+    match = _look_up(
+        accounts.registry().select(account),
+        lambda target: whatsapp_get_chat(target, chat_jid, include_last_message),
+        _last_active,
+    )
+    return _located(*match) if match else None
 
 
 @mcp.tool()
-def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any]:
+def get_direct_chat_by_contact(sender_phone_number: str, account: AccountName = None) -> dict[str, Any]:
     """Get WhatsApp chat metadata by sender phone number.
+
+    Looks in every account unless one is named. When several accounts have a
+    direct chat with the number, the most recently active one is returned and
+    `also_in_accounts` names the others.
 
     Args:
         sender_phone_number: The phone number to search for
+        account: Account to look in (see list_accounts); omit to look in every account
     """
-    chat = whatsapp_get_direct_chat_by_contact(_account(), sender_phone_number)
-    return chat
+    match = _look_up(
+        accounts.registry().select(account),
+        lambda target: whatsapp_get_direct_chat_by_contact(target, sender_phone_number),
+        _last_active,
+    )
+    return _located(*match) if match else None
 
 
 @mcp.tool()
@@ -492,35 +585,71 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0, account: Account
 
 
 @mcp.tool()
-def get_last_interaction(jid: str) -> dict[str, Any]:
+def get_last_interaction(jid: str, account: AccountName = None) -> dict[str, Any]:
     """Get most recent WhatsApp message involving the contact.
+
+    Looks in every account unless one is named. When several accounts have
+    messages with the contact, the newest one is returned and `also_in_accounts`
+    names the others.
 
     Args:
         jid: The JID of the contact to search for
+        account: Account to look in (see list_accounts); omit to look in every account
 
     Returns:
         Message dictionary with id, timestamp, sender, content, etc. or empty dict if not found.
     """
-    message = whatsapp_get_last_interaction(_account(), jid)
-    return message if message else {}
+    match = _look_up(
+        accounts.registry().select(account),
+        lambda target: whatsapp_get_last_interaction(target, jid),
+        lambda _target, message: message["timestamp"],
+    )
+    return _located(*match) if match else {}
 
 
 @mcp.tool()
-def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dict[str, Any]:
+def get_message_context(
+    message_id: str, before: int = 5, after: int = 5, account: AccountName = None
+) -> dict[str, Any]:
     """Get context around a specific WhatsApp message.
+
+    Looks in every account unless one is named. A message between two of your
+    accounts is held by both: the one whose chat was most recently active is
+    returned and `also_in_accounts` names the others. With several accounts the
+    result and each message carry an `account` field.
 
     Args:
         message_id: The ID of the message to get context for
         before: Number of messages to include before the target message (default 5)
         after: Number of messages to include after the target message (default 5)
+        account: Account to look in (see list_accounts); omit to look in every account
     """
-    account = _account()
-    context = whatsapp_get_message_context(account, message_id, before, after)
-    return {
-        "message": msg_to_dict(account, context.message),
-        "before": [msg_to_dict(account, message) for message in context.before],
-        "after": [msg_to_dict(account, message) for message in context.after],
-    }
+
+    def context_in(target: Account) -> MessageContext | None:
+        try:
+            return whatsapp_get_message_context(target, message_id, before, after)
+        except MessageNotFoundError:
+            return None
+
+    match = _look_up(
+        accounts.registry().select(account),
+        context_in,
+        lambda target, context: _last_active(
+            target, whatsapp_get_chat(target, context.message.chat_jid, include_last_message=False) or {}
+        ),
+    )
+    if match is None:
+        raise MessageNotFoundError(f"Message with ID {message_id} not found")
+    target, context, also_in = match
+
+    def rows(messages: list[Message]) -> list[dict[str, Any]]:
+        return _tagged(target, [msg_to_dict(target, message) for message in messages])
+
+    return _located(
+        target,
+        {"message": rows([context.message])[0], "before": rows(context.before), "after": rows(context.after)},
+        also_in,
+    )
 
 
 @mcp.tool()
