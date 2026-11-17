@@ -107,6 +107,18 @@ AccountName = Annotated[
 ]
 
 
+SendingAccount = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Name of the account (WhatsApp number) to send from, as listed by list_accounts. "
+            "Required when several accounts are configured: ask the user which account to send from, "
+            "never pick one yourself. Optional with a single account."
+        )
+    ),
+]
+
+
 def _account() -> Account:
     # Until the tools learn which account to act on, they use the first one configured.
     return accounts.registry().first()
@@ -160,6 +172,15 @@ def _look_up(
     # A single match needs no activity, which may cost another read.
     target, item = found[0] if len(found) == 1 else max(found, key=lambda match: _instant(activity(*match)))
     return target, item, [other.name for other, _ in found if other is not target]
+
+
+def _sent(account: Account, success: bool, message: str) -> dict[str, Any]:
+    """A send's result, naming the account and number it went out from once there are several."""
+    result: dict[str, Any] = {"success": success, "message": message}
+    if accounts.registry().several:
+        result["account"] = account.name
+        result["account_phone_number"] = whatsapp_own_number(account)
+    return result
 
 
 def _located(account: Account, row: dict[str, Any], also_in: list[str]) -> dict[str, Any]:
@@ -660,8 +681,12 @@ def send_message(
     quoted_sender_jid: str = "",
     quoted_content: str = "",
     mentions: list[str] | None = None,
+    account: SendingAccount = None,
 ) -> dict[str, Any]:
     """Send a WhatsApp message to a person or group. For group chats use the JID.
+
+    With several accounts configured, `account` is required: ask the user which
+    account (number) to send from. A reply names its account too, for now.
 
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
@@ -677,19 +702,22 @@ def send_message(
                   ["420601234567"]) or JIDs. For each entry the message text must contain
                   a matching "@<number>" token (e.g. "hi @420601234567"), otherwise the
                   mention won't render on recipients' devices. Only meaningful in groups.
+        account: Account to send from (see list_accounts); required when several are configured
 
     Returns:
-        A dictionary containing success status and a status message
+        A dictionary containing success status and a status message; with several
+        accounts also `account` and `account_phone_number`, the number it went out from
     """
+    sender = accounts.registry().sender(account)
     # Validate input
     if not recipient:
-        return {"success": False, "message": "Recipient must be provided"}
+        return _sent(sender, False, "Recipient must be provided")
 
     # Call the whatsapp_send_message function with the unified recipient parameter
     success, status_message = whatsapp_send_message(
-        _account(), recipient, message, quoted_message_id, quoted_sender_jid, quoted_content, mentions
+        sender, recipient, message, quoted_message_id, quoted_sender_jid, quoted_content, mentions
     )
-    return {"success": success, "message": status_message}
+    return _sent(sender, success, status_message)
 
 
 @mcp.tool()
@@ -744,12 +772,14 @@ def mark_messages_read(
 
 
 @mcp.tool()
-def send_file(recipient: str, media_path: str, caption: str = "") -> dict[str, Any]:
+def send_file(recipient: str, media_path: str, caption: str = "", account: SendingAccount = None) -> dict[str, Any]:
     """Send a file (image, video, document) via WhatsApp, optionally with a caption.
 
     When `caption` is provided, the file and text arrive as a single
     attachment-with-caption message (one bubble in the WA UI), instead of
     needing a separate follow-up send_message call. For group chats use the JID.
+    With several accounts configured, `account` is required: ask the user which
+    account (number) to send from.
 
     Args:
         recipient: Either a phone number with country code (no + or symbols),
@@ -757,30 +787,37 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> dict[str, A
         media_path: Absolute path to the media file (image, video, document)
         caption: Optional text rendered with the file as a caption. Omit for a
                  bare attachment.
+        account: Account to send from (see list_accounts); required when several are configured
 
     Returns:
-        A dictionary containing success status and a status message
+        A dictionary containing success status and a status message; with several
+        accounts also `account` and `account_phone_number`, the number it went out from
     """
-
-    # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(_account(), recipient, media_path, caption)
-    return {"success": success, "message": status_message}
+    sender = accounts.registry().sender(account)
+    success, status_message = whatsapp_send_file(sender, recipient, media_path, caption)
+    return _sent(sender, success, status_message)
 
 
 @mcp.tool()
-def send_audio_message(recipient: str, media_path: str) -> dict[str, Any]:
+def send_audio_message(recipient: str, media_path: str, account: SendingAccount = None) -> dict[str, Any]:
     """Send any audio file as a WhatsApp audio message to the specified recipient. For group messages use the JID. If it errors due to ffmpeg not being installed, use send_file instead.
+
+    With several accounts configured, `account` is required: ask the user which
+    account (number) to send from.
 
     Args:
         recipient: The recipient - either a phone number with country code but no + or other symbols,
                  or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
         media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file)
+        account: Account to send from (see list_accounts); required when several are configured
 
     Returns:
-        A dictionary containing success status and a status message
+        A dictionary containing success status and a status message; with several
+        accounts also `account` and `account_phone_number`, the number it went out from
     """
-    success, status_message = whatsapp_audio_voice_message(_account(), recipient, media_path)
-    return {"success": success, "message": status_message}
+    sender = accounts.registry().sender(account)
+    success, status_message = whatsapp_audio_voice_message(sender, recipient, media_path)
+    return _sent(sender, success, status_message)
 
 
 @mcp.tool()

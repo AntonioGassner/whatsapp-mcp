@@ -80,10 +80,10 @@ def test_existing_tools_act_on_the_first_account_until_they_take_one(account_sto
     )
     fake_bridge.ports[8081] = FakeResponse()
 
-    assert main.send_message("12025551234", "hello")["success"] is True
+    assert main.mark_messages_read(["m1"], "12025551234@s.whatsapp.net")["success"] is True
 
     assert [(call["url"], call["headers"]) for call in fake_bridge.calls] == [
-        ("http://localhost:8081/api/send", {"Authorization": "Bearer personal-token"})
+        ("http://localhost:8081/api/mark-read", {"Authorization": "Bearer personal-token"})
     ]
 
 

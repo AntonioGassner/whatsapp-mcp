@@ -229,6 +229,7 @@ Send a text message to a contact or group, optionally as a quoted reply.
 - `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
 - `quoted_content` (optional): Text content of the quoted message, used for the reply preview. Only plain text is supported.
 - `mentions` (optional): List of users to @-mention, as phone numbers with country code (e.g. `["12025551234"]`) or JIDs. For each entry the message text must contain a matching `@<number>` token (e.g. `"thanks @12025551234!"`), which recipients' devices render as a highlighted, tappable mention that also notifies the user. Only meaningful in group chats.
+- `account` (required with several accounts): Account name from `list_accounts` to send from; optional with a single account
 
 Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
 
@@ -307,6 +308,7 @@ attachments sent by older bridge versions or prevent WhatsApp media expiry.
 - `recipient` (required): Phone number or group JID
 - `file_path` (required): Path to the file
 - `caption` (optional): Caption for the media
+- `account` (required with several accounts): Account name from `list_accounts` to send from; optional with a single account
 
 The bridge only reads files inside configured media roots. By default this is
 `~/.local/share/whatsapp-mcp/outbox`; set `WHATSAPP_MEDIA_ROOTS` to allow
@@ -323,6 +325,7 @@ Send a voice message (automatically converts to Opus .ogg format).
 
 - `recipient` (required): Phone number or group JID
 - `file_path` (required): Path to audio file
+- `account` (required with several accounts): Account name from `list_accounts` to send from; optional with a single account
 
 Converted audio is sent through the same media-path confinement as
 `send_file`.
@@ -804,9 +807,15 @@ and `get_message_context` also look in every account unless you pass
 hold), the match from the most recently active account is returned, tagged
 with its `account`, and `also_in_accounts` names the others.
 
-The send, reaction, read-receipt and media tools currently act on the first
-account in the file; choosing the account a message goes out from is being
-added.
+`send_message`, `send_file` and `send_audio_message` never pick an account by
+themselves: with several accounts, `account` is required, and a send without
+it fails before any bridge is contacted, listing the valid names. The send goes
+to that account's bridge with that account's token, and the result carries
+`account` and `account_phone_number`, the number it went out from. For now this
+includes quoted replies.
+
+The reaction, read-receipt and media tools currently act on the first account
+in the file; using the account that holds the message is being added.
 
 ### Run automatically on macOS
 
