@@ -2,7 +2,9 @@ import os
 import signal
 import sys
 import tempfile
-from typing import Annotated, Any
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Annotated, Any, TypeVar
 
 from mcp.server.fastmcp import FastMCP, Image
 from pydantic import Field
@@ -18,6 +20,9 @@ from whatsapp import (
 )
 from whatsapp import (
     download_media as whatsapp_download_media,
+)
+from whatsapp import (
+    find_messages as whatsapp_find_messages,
 )
 from whatsapp import (
     get_chat as whatsapp_get_chat,
@@ -67,6 +72,11 @@ from whatsapp import (
 from whatsapp import (
     send_reaction as whatsapp_send_reaction,
 )
+from whatsapp import (
+    with_context as whatsapp_with_context,
+)
+
+T = TypeVar("T")
 
 # Initialize FastMCP server. Env-var handling is deferred to the __main__ block
 # so importing this module never parses env vars or exits the process.
@@ -83,9 +93,95 @@ PreviewDimension = Annotated[
 ]
 
 
+AccountName = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Name of the account (WhatsApp number) to read, as listed by list_accounts. "
+            "Omit to read every account; with several accounts each result carries an `account` field."
+        )
+    ),
+]
+
+
 def _account() -> Account:
     # Until the tools learn which account to act on, they use the first one configured.
     return accounts.registry().first()
+
+
+def _tagged(account: Account, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Say which account each row came from, once there is more than one to come from."""
+    if not accounts.registry().several:
+        return rows
+    return [{**row, "account": account.name} for row in rows]
+
+
+def _read_each(targets: tuple[Account, ...], read: Callable[[Account], list[T]]) -> list[tuple[Account, list[T]]]:
+    """Run one read per account, skipping accounts whose store is missing.
+
+    Only an account that was asked for by itself, or a read where no account had
+    a store at all, fails loudly: one broken bridge must not hide the others.
+    """
+    results = []
+    missing: FileNotFoundError | None = None
+    for account in targets:
+        try:
+            results.append((account, read(account)))
+        except FileNotFoundError as exc:
+            if len(targets) == 1:
+                raise
+            missing = missing or exc
+    if not results and missing:
+        raise missing
+    return results
+
+
+def _merged_page(
+    per_account: list[tuple[Account, list[T]]], key: Callable[[T], Any], reverse: bool, limit: int, page: int
+) -> list[tuple[Account, T]]:
+    """One page of every account's rows in a single order.
+
+    Each account must have returned its first (page + 1) * limit rows in that
+    order, so the page is exact: page N continues where page N-1 stopped.
+    Ties keep the accounts' order, so paging is stable.
+    """
+    rows = [(account, row) for account, account_rows in per_account for row in account_rows]
+    rows.sort(key=lambda item: key(item[1]), reverse=reverse)
+    return rows[page * limit : (page + 1) * limit]
+
+
+def _instant(value: datetime | str | None) -> tuple[bool, datetime]:
+    """Sort key for a timestamp that may be missing; missing sorts before any time."""
+    if value is None:
+        return (False, datetime.min.replace(tzinfo=UTC))
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return (True, value)
+
+
+def _chats_page(
+    targets: tuple[Account, ...],
+    read: Callable[[Account, int, int], list[dict[str, Any]]],
+    sort_by: str,
+    limit: int,
+    page: int,
+) -> list[dict[str, Any]]:
+    """One page of chats from the target accounts; read(account, limit, page) reads one account."""
+    if len(targets) == 1:
+        return _tagged(targets[0], read(targets[0], limit, page))
+    per_account = _read_each(targets, lambda target: read(target, (page + 1) * limit, 0))
+    key, reverse = _chat_order(sort_by)
+    return [{**chat, "account": target.name} for target, chat in _merged_page(per_account, key, reverse, limit, page)]
+
+
+def _chat_order(sort_by: str) -> tuple[Callable[[dict[str, Any]], Any], bool]:
+    """The merge key and direction matching whatsapp.list_chats' ORDER BY."""
+    if sort_by == "last_active":
+        return (lambda chat: _instant(chat["last_message_time"])), True
+    # SQLite sorts NULL names first and strings by code point, as Python does.
+    return (lambda chat: (chat["name"] is not None, chat["name"] or "")), False
 
 
 @mcp.tool()
@@ -113,14 +209,19 @@ def list_accounts() -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def search_contacts(query: str) -> list[dict[str, Any]]:
+def search_contacts(query: str, account: AccountName = None) -> list[dict[str, Any]]:
     """Search WhatsApp contacts by name or phone number.
+
+    Searches every account unless one is named. A person known on two accounts
+    is listed once per account.
 
     Args:
         query: Search term to match against contact names or phone numbers
+        account: Account to search (see list_accounts); omit to search every account
     """
-    contacts = whatsapp_search_contacts(_account(), query)
-    return contacts
+    targets = accounts.registry().select(account)
+    per_account = _read_each(targets, lambda target: whatsapp_search_contacts(target, query))
+    return [row for target, contacts in per_account for row in _tagged(target, contacts)]
 
 
 @mcp.tool()
@@ -228,10 +329,14 @@ def list_messages(
     context_before: int = 1,
     context_after: int = 1,
     sort_by: str = "newest",
+    account: AccountName = None,
 ) -> list[dict[str, Any]]:
     """Get WhatsApp messages matching specified criteria with optional context.
 
     Each message includes sender_display showing "Name (phone)" for easy identification.
+    Searches every account unless one is named: matches from all accounts are merged
+    into one list in the requested order and paged after merging. With several
+    accounts each message, including context messages, carries an `account` field.
 
     Args:
         after: ISO-8601 date string (e.g., "2026-01-01" or "2026-01-01T09:00:00")
@@ -245,25 +350,45 @@ def list_messages(
         context_before: Messages to include before each match (default 1)
         context_after: Messages to include after each match (default 1)
         sort_by: "newest" (default, most recent first) or "oldest" (chronological)
+        account: Account to search (see list_accounts); omit to search every account
     """
     # Cap limit at 500 to prevent excessive queries
     limit = max(1, min(limit, 500))
     page = max(0, page)
-    messages = whatsapp_list_messages(
-        _account(),
-        after=after,
-        before=before,
-        sender_phone_number=sender_phone_number,
-        chat_jid=chat_jid,
-        query=query,
+    filters = {
+        "after": after,
+        "before": before,
+        "sender_phone_number": sender_phone_number,
+        "chat_jid": chat_jid,
+        "query": query,
+        "sort_by": sort_by,
+    }
+    targets = accounts.registry().select(account)
+    if len(targets) == 1:
+        messages = whatsapp_list_messages(
+            targets[0],
+            limit=limit,
+            page=page,
+            include_context=include_context,
+            context_before=context_before,
+            context_after=context_after,
+            **filters,
+        )
+        return _tagged(targets[0], messages)
+
+    # Page the matches first, then add each match's context from its own account.
+    per_account = _read_each(
+        targets, lambda target: whatsapp_find_messages(target, limit=(page + 1) * limit, page=0, **filters)
+    )
+    matches = _merged_page(
+        per_account,
+        key=lambda message: _instant(message.timestamp),
+        reverse=sort_by == "newest",
         limit=limit,
         page=page,
-        include_context=include_context,
-        context_before=context_before,
-        context_after=context_after,
-        sort_by=sort_by,
     )
-    return messages
+    rows = whatsapp_with_context(matches, include_context, context_before, context_after)
+    return [{**msg_to_dict(target, message), "account": target.name} for target, message in rows]
 
 
 @mcp.tool()
@@ -273,8 +398,13 @@ def list_chats(
     page: int = 0,
     include_last_message: bool = True,
     sort_by: str = "last_active",
+    account: AccountName = None,
 ) -> list[dict[str, Any]]:
     """Get WhatsApp chats matching specified criteria.
+
+    Lists every account's chats unless one is named, merged in the requested order
+    and paged after merging. A chat that exists in two accounts is listed once per
+    account; with several accounts each chat carries an `account` field.
 
     Args:
         query: Search term to filter chats by name or JID
@@ -282,6 +412,7 @@ def list_chats(
         page: Page number for pagination (default 0)
         include_last_message: Include the last message in each chat (default True)
         sort_by: "last_active" (default, most recent first) or "name" (alphabetical)
+        account: Account to list (see list_accounts); omit to list every account
 
     Returns:
         Chat dictionaries with jid, name, is_group, last_message_time, last_message,
@@ -294,10 +425,20 @@ def list_chats(
     # Cap limit at 200 to prevent excessive queries
     limit = max(1, min(limit, 200))
     page = max(0, page)
-    chats = whatsapp_list_chats(
-        _account(), query=query, limit=limit, page=page, include_last_message=include_last_message, sort_by=sort_by
+    return _chats_page(
+        accounts.registry().select(account),
+        lambda target, rows, offset_page: whatsapp_list_chats(
+            target,
+            query=query,
+            limit=rows,
+            page=offset_page,
+            include_last_message=include_last_message,
+            sort_by=sort_by,
+        ),
+        sort_by,
+        limit,
+        page,
     )
-    return chats
 
 
 @mcp.tool()
@@ -327,18 +468,27 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
+def get_contact_chats(jid: str, limit: int = 20, page: int = 0, account: AccountName = None) -> list[dict[str, Any]]:
     """Get all WhatsApp chats involving the contact.
+
+    Covers every account unless one is named, merged by last activity and paged
+    after merging. With several accounts each chat carries an `account` field.
 
     Args:
         jid: The contact's JID to search for
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
+        account: Account to search (see list_accounts); omit to search every account
     """
     limit = max(1, min(limit, 200))
     page = max(0, page)
-    chats = whatsapp_get_contact_chats(_account(), jid, limit, page)
-    return chats
+    return _chats_page(
+        accounts.registry().select(account),
+        lambda target, rows, offset_page: whatsapp_get_contact_chats(target, jid, rows, offset_page),
+        "last_active",
+        limit,
+        page,
+    )
 
 
 @mcp.tool()
