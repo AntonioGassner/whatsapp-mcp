@@ -10,6 +10,7 @@ import sqlite3
 import pytest
 
 import whatsapp
+from tests.conftest import first_account, use_default_account
 
 SCHEMA = """
     CREATE TABLE chats (jid TEXT PRIMARY KEY, name TEXT, last_message_time TIMESTAMP, last_read_time TIMESTAMP);
@@ -33,18 +34,18 @@ def _make_db(path):
 @pytest.mark.parametrize(
     "call",
     [
-        lambda: whatsapp.list_chats(),
-        lambda: whatsapp.list_messages(include_context=False),
-        lambda: whatsapp.get_chat("x@s.whatsapp.net"),
-        lambda: whatsapp.get_direct_chat_by_contact("15551234567"),
-        lambda: whatsapp.get_contact_chats("15551234567"),
-        lambda: whatsapp.get_last_interaction("15551234567"),
-        lambda: whatsapp.get_message_context("msg-1"),
+        lambda: whatsapp.list_chats(first_account()),
+        lambda: whatsapp.list_messages(first_account(), include_context=False),
+        lambda: whatsapp.get_chat(first_account(), "x@s.whatsapp.net"),
+        lambda: whatsapp.get_direct_chat_by_contact(first_account(), "15551234567"),
+        lambda: whatsapp.get_contact_chats(first_account(), "15551234567"),
+        lambda: whatsapp.get_last_interaction(first_account(), "15551234567"),
+        lambda: whatsapp.get_message_context(first_account(), "msg-1"),
     ],
 )
 def test_missing_messages_db_is_a_loud_error_and_creates_nothing(tmp_path, monkeypatch, call):
     missing = tmp_path / "store" / "messages.db"
-    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(missing))
+    use_default_account(monkeypatch, WHATSAPP_DB_PATH=str(missing))
 
     with pytest.raises(FileNotFoundError, match="WHATSAPP_DB_PATH"):
         call()
@@ -55,14 +56,14 @@ def test_missing_messages_db_is_a_loud_error_and_creates_nothing(tmp_path, monke
 def test_sender_name_enrichment_degrades_to_jid_when_db_missing(tmp_path, monkeypatch):
     # get_sender_name decorates rows that were already read; it must not turn a
     # stubbed or cached result into a hard failure.
-    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(tmp_path / "missing.db"))
-    assert whatsapp.get_sender_name("15551234567@s.whatsapp.net") == "15551234567@s.whatsapp.net"
+    use_default_account(monkeypatch, WHATSAPP_DB_PATH=str(tmp_path / "missing.db"))
+    assert whatsapp.get_sender_name(first_account(), "15551234567@s.whatsapp.net") == "15551234567@s.whatsapp.net"
 
 
 def test_messages_db_is_opened_read_only(tmp_path, monkeypatch):
-    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(_make_db(tmp_path / "messages.db")))
+    use_default_account(monkeypatch, WHATSAPP_DB_PATH=str(_make_db(tmp_path / "messages.db")))
 
-    conn = whatsapp._connect_messages_db()
+    conn = whatsapp._connect_messages_db(first_account())
     try:
         conn.execute("PRAGMA query_only = OFF")
         with pytest.raises(sqlite3.OperationalError, match="readonly"):
@@ -73,7 +74,7 @@ def test_messages_db_is_opened_read_only(tmp_path, monkeypatch):
 
 def test_removed_database_is_not_recreated(tmp_path, monkeypatch):
     db = _make_db(tmp_path / "messages.db")
-    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(db))
+    use_default_account(monkeypatch, WHATSAPP_DB_PATH=str(db))
     connect = sqlite3.connect
 
     def remove_before_open(*args, **kwargs):
@@ -82,7 +83,7 @@ def test_removed_database_is_not_recreated(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sqlite3, "connect", remove_before_open)
     with pytest.raises(FileNotFoundError):
-        whatsapp._connect_messages_db()
+        whatsapp._connect_messages_db(first_account())
     assert not db.exists()
 
 
@@ -90,7 +91,7 @@ def test_messages_db_path_with_uri_special_characters(tmp_path, monkeypatch):
     # Spaces, '#' and '?' are all legal in a path; the connection must take
     # the path as-is rather than treating it as a URI.
     db = _make_db(tmp_path / "wa mcp #1" / "why?" / "messages.db")
-    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(db))
+    use_default_account(monkeypatch, WHATSAPP_DB_PATH=str(db))
 
-    assert whatsapp.list_chats() == []
-    assert whatsapp.list_messages(include_context=False) == []
+    assert whatsapp.list_chats(first_account()) == []
+    assert whatsapp.list_messages(first_account(), include_context=False) == []

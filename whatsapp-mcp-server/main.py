@@ -7,13 +7,14 @@ from typing import Annotated, Any
 from mcp.server.fastmcp import FastMCP, Image
 from pydantic import Field
 
+import accounts
 import media_preview
 import transcription
+from accounts import Account
 from mcp_config import resolve_host, resolve_port, resolve_transport
 from parent_watchdog import install_stdio_parent_watchdog
 from whatsapp import (
-    MESSAGES_DB_PATH,
-    msg_to_dict,
+    connection_status as whatsapp_connection_status,
 )
 from whatsapp import (
     download_media as whatsapp_download_media,
@@ -46,6 +47,12 @@ from whatsapp import (
     mark_messages_read as whatsapp_mark_messages_read,
 )
 from whatsapp import (
+    msg_to_dict,
+)
+from whatsapp import (
+    own_number as whatsapp_own_number,
+)
+from whatsapp import (
     search_contacts as whatsapp_search_contacts,
 )
 from whatsapp import (
@@ -76,6 +83,35 @@ PreviewDimension = Annotated[
 ]
 
 
+def _account() -> Account:
+    # Until the tools learn which account to act on, they use the first one configured.
+    return accounts.registry().first()
+
+
+@mcp.tool()
+def list_accounts() -> list[dict[str, Any]]:
+    """List the WhatsApp accounts (phone numbers) this server serves and whether each one works.
+
+    Without an accounts file there is a single account named "default".
+
+    Returns:
+        One dictionary per account with its name, its own phone_number (null when
+        its whatsmeow store can't be read), store_available (whether its messages
+        database exists) and bridge: reachable, plus the bridge's reported state,
+        connected and paired flags and message, or an error when it can't be asked.
+        One broken account never hides the others.
+    """
+    return [
+        {
+            "name": account.name,
+            "phone_number": whatsapp_own_number(account),
+            "store_available": os.path.isfile(account.messages_db_path),
+            "bridge": whatsapp_connection_status(account),
+        }
+        for account in accounts.registry().accounts
+    ]
+
+
 @mcp.tool()
 def search_contacts(query: str) -> list[dict[str, Any]]:
     """Search WhatsApp contacts by name or phone number.
@@ -83,7 +119,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     Args:
         query: Search term to match against contact names or phone numbers
     """
-    contacts = whatsapp_search_contacts(query)
+    contacts = whatsapp_search_contacts(_account(), query)
     return contacts
 
 
@@ -149,9 +185,10 @@ def get_contact(
     if bare_numeric_digits:
         candidates.append((f"{bare_numeric_digits}@lid", True))
 
+    account = _account()
     chat = None
     for candidate_jid, candidate_is_lid in candidates:
-        chat = whatsapp_get_chat(candidate_jid, include_last_message=False)
+        chat = whatsapp_get_chat(account, candidate_jid, include_last_message=False)
         if chat:
             jid = candidate_jid
             is_lid = candidate_is_lid
@@ -163,7 +200,7 @@ def get_contact(
         resolved = display_name not in (jid, jid_user)
     else:
         # Fallback: best-effort sender-name resolution (may use fuzzy LIKE lookup).
-        display_name = whatsapp_get_sender_name(jid)
+        display_name = whatsapp_get_sender_name(account, jid)
         resolved = display_name not in (jid, jid_user, identifier)
 
     return {
@@ -213,6 +250,7 @@ def list_messages(
     limit = max(1, min(limit, 500))
     page = max(0, page)
     messages = whatsapp_list_messages(
+        _account(),
         after=after,
         before=before,
         sender_phone_number=sender_phone_number,
@@ -257,7 +295,7 @@ def list_chats(
     limit = max(1, min(limit, 200))
     page = max(0, page)
     chats = whatsapp_list_chats(
-        query=query, limit=limit, page=page, include_last_message=include_last_message, sort_by=sort_by
+        _account(), query=query, limit=limit, page=page, include_last_message=include_last_message, sort_by=sort_by
     )
     return chats
 
@@ -273,7 +311,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
     Returns:
         Chat dictionary — same shape as list_chats, including last_read_time and unread.
     """
-    chat = whatsapp_get_chat(chat_jid, include_last_message)
+    chat = whatsapp_get_chat(_account(), chat_jid, include_last_message)
     return chat
 
 
@@ -284,7 +322,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any]:
     Args:
         sender_phone_number: The phone number to search for
     """
-    chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
+    chat = whatsapp_get_direct_chat_by_contact(_account(), sender_phone_number)
     return chat
 
 
@@ -299,7 +337,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
     """
     limit = max(1, min(limit, 200))
     page = max(0, page)
-    chats = whatsapp_get_contact_chats(jid, limit, page)
+    chats = whatsapp_get_contact_chats(_account(), jid, limit, page)
     return chats
 
 
@@ -313,7 +351,7 @@ def get_last_interaction(jid: str) -> dict[str, Any]:
     Returns:
         Message dictionary with id, timestamp, sender, content, etc. or empty dict if not found.
     """
-    message = whatsapp_get_last_interaction(jid)
+    message = whatsapp_get_last_interaction(_account(), jid)
     return message if message else {}
 
 
@@ -326,11 +364,12 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> dic
         before: Number of messages to include before the target message (default 5)
         after: Number of messages to include after the target message (default 5)
     """
-    context = whatsapp_get_message_context(message_id, before, after)
+    account = _account()
+    context = whatsapp_get_message_context(account, message_id, before, after)
     return {
-        "message": msg_to_dict(context.message),
-        "before": [msg_to_dict(message) for message in context.before],
-        "after": [msg_to_dict(message) for message in context.after],
+        "message": msg_to_dict(account, context.message),
+        "before": [msg_to_dict(account, message) for message in context.before],
+        "after": [msg_to_dict(account, message) for message in context.after],
     }
 
 
@@ -369,7 +408,7 @@ def send_message(
 
     # Call the whatsapp_send_message function with the unified recipient parameter
     success, status_message = whatsapp_send_message(
-        recipient, message, quoted_message_id, quoted_sender_jid, quoted_content, mentions
+        _account(), recipient, message, quoted_message_id, quoted_sender_jid, quoted_content, mentions
     )
     return {"success": success, "message": status_message}
 
@@ -396,7 +435,7 @@ def send_reaction(
     Returns:
         A dictionary containing success status and a status message
     """
-    success, status_message = whatsapp_send_reaction(recipient, message_id, emoji, from_me, sender_jid)
+    success, status_message = whatsapp_send_reaction(_account(), recipient, message_id, emoji, from_me, sender_jid)
     return {"success": success, "message": status_message}
 
 
@@ -421,7 +460,7 @@ def mark_messages_read(
     Returns:
         A dictionary containing success status and a status message
     """
-    success, status_message = whatsapp_mark_messages_read(message_ids, chat_jid, sender_jid, timestamp)
+    success, status_message = whatsapp_mark_messages_read(_account(), message_ids, chat_jid, sender_jid, timestamp)
     return {"success": success, "message": status_message}
 
 
@@ -445,7 +484,7 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> dict[str, A
     """
 
     # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(recipient, media_path, caption)
+    success, status_message = whatsapp_send_file(_account(), recipient, media_path, caption)
     return {"success": success, "message": status_message}
 
 
@@ -461,7 +500,7 @@ def send_audio_message(recipient: str, media_path: str) -> dict[str, Any]:
     Returns:
         A dictionary containing success status and a status message
     """
-    success, status_message = whatsapp_audio_voice_message(recipient, media_path)
+    success, status_message = whatsapp_audio_voice_message(_account(), recipient, media_path)
     return {"success": success, "message": status_message}
 
 
@@ -476,7 +515,7 @@ def download_media(message_id: str, chat_jid: str) -> dict[str, Any]:
     Returns:
         A dictionary containing success status, a status message, and the file path if successful
     """
-    file_path = whatsapp_download_media(message_id, chat_jid)
+    file_path = whatsapp_download_media(_account(), message_id, chat_jid)
 
     if file_path:
         return {"success": True, "message": "Media downloaded successfully", "file_path": file_path}
@@ -512,7 +551,7 @@ def view_media(
     except media_preview.PreviewError as exc:
         return {"success": False, "message": str(exc)}
 
-    file_path = whatsapp_download_media(message_id, chat_jid)
+    file_path = whatsapp_download_media(_account(), message_id, chat_jid)
     if not file_path:
         return {"success": False, "message": "Failed to download media"}
 
@@ -547,14 +586,15 @@ def transcribe_audio(message_id: str, chat_jid: str, force: bool = False) -> dic
     Returns:
         A dictionary with success status and the transcript
     """
+    account = _account()
     if not force:
-        existing = transcription.stored_transcript(MESSAGES_DB_PATH, message_id, chat_jid)
+        existing = transcription.stored_transcript(account.messages_db_path, message_id, chat_jid)
         if existing:
             return {"success": True, "message": "Transcript already stored", "transcript": existing}
 
     # WhatsApp expires media server-side after a few weeks, so the file has to
     # be on disk. This is a no-op when the bridge already downloaded it.
-    file_path = whatsapp_download_media(message_id, chat_jid)
+    file_path = whatsapp_download_media(account, message_id, chat_jid)
     if not file_path:
         return {
             "success": False,
@@ -578,7 +618,9 @@ def transcribe_audio(message_id: str, chat_jid: str, force: bool = False) -> dic
     except transcription.TranscriptionError as exc:
         return {"success": False, "message": str(exc)}
 
-    if not transcription.store_transcript(MESSAGES_DB_PATH, message_id, chat_jid, text, model, provider=provider):
+    if not transcription.store_transcript(
+        account.messages_db_path, message_id, chat_jid, text, model, provider=provider
+    ):
         # The words are worth returning even when the row could not be updated,
         # but say so: without the row, list_messages will not show them.
         return {
@@ -609,7 +651,9 @@ if __name__ == "__main__":
     # Resolve the transport first: host/port are only used (and validated) for the
     # network transports, so a bad WHATSAPP_MCP_PORT can't break a stdio launch.
     # The localhost default keeps a remote server unreachable until explicitly opened up.
+    # An unusable accounts file stops startup instead of silently dropping an account.
     try:
+        accounts.registry()
         transport = resolve_transport(os.getenv("WHATSAPP_MCP_TRANSPORT"))
         if transport != "stdio":
             mcp.settings.host = resolve_host(os.getenv("WHATSAPP_MCP_HOST"))

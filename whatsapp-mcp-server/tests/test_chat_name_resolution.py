@@ -12,6 +12,7 @@ import sqlite3
 import pytest
 
 import whatsapp
+from tests.conftest import first_account, use_default_account
 
 PEER = "31600000001@s.whatsapp.net"
 NAMED = "31600000002@s.whatsapp.net"
@@ -108,8 +109,7 @@ def dbs(tmp_path, monkeypatch):
     whatsmeow = tmp_path / "whatsapp.db"
     _make_messages_db(str(messages))
     _make_whatsmeow_db(str(whatsmeow))
-    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(messages))
-    monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", str(whatsmeow))
+    use_default_account(monkeypatch, WHATSAPP_DB_PATH=str(messages), WHATSMEOW_DB_PATH=str(whatsmeow))
     return messages, whatsmeow
 
 
@@ -118,29 +118,29 @@ def _by_jid(chats):
 
 
 def test_list_chats_resolves_placeholder_from_contact_store(dbs):
-    chats = _by_jid(whatsapp.list_chats(limit=50))
+    chats = _by_jid(whatsapp.list_chats(first_account(), limit=50))
     assert chats[PEER]["name"] == "Ada Lovelace"
 
 
 def test_list_chats_keeps_real_stored_name(dbs):
-    chats = _by_jid(whatsapp.list_chats(limit=50))
+    chats = _by_jid(whatsapp.list_chats(first_account(), limit=50))
     assert chats[NAMED]["name"] == "Bert"
 
 
 def test_list_chats_resolves_lid_via_lid_map(dbs):
-    chats = _by_jid(whatsapp.list_chats(limit=50))
+    chats = _by_jid(whatsapp.list_chats(first_account(), limit=50))
     assert chats[LID_MAPPED]["name"] == "Via LID"
 
 
 def test_list_chats_keeps_placeholder_when_unresolvable(dbs):
     """A LID that is not in whatsmeow_lid_map has nothing to resolve to."""
-    chats = _by_jid(whatsapp.list_chats(limit=50))
+    chats = _by_jid(whatsapp.list_chats(first_account(), limit=50))
     assert chats[LID_UNMAPPED]["name"] == "222222222222222"
     assert chats[GROUP]["name"] == "Group 120363000000000001"
 
 
 def test_get_chat_resolves_placeholder(dbs):
-    chat = whatsapp.get_chat(PEER, include_last_message=False)
+    chat = whatsapp.get_chat(first_account(), PEER, include_last_message=False)
     assert chat is not None
     assert chat["name"] == "Ada Lovelace"
 
@@ -155,7 +155,7 @@ def test_get_chat_repairs_stored_self_number_without_bridge(dbs, contact_availab
     with sqlite3.connect(messages) as conn:
         conn.execute("UPDATE chats SET name = '31699999999' WHERE jid = ?", (PEER,))
     expected = "Ada Lovelace" if contact_available else "31600000001"
-    assert whatsapp.get_chat(PEER, include_last_message=False)["name"] == expected
+    assert whatsapp.get_chat(first_account(), PEER, include_last_message=False)["name"] == expected
     with sqlite3.connect(messages) as conn:
         assert conn.execute("SELECT name FROM chats WHERE jid = ?", (PEER,)).fetchone()[0] == "31699999999"
 
@@ -164,19 +164,19 @@ def test_other_numeric_names_are_preserved(dbs):
     messages, _ = dbs
     with sqlite3.connect(messages) as conn:
         conn.execute("UPDATE chats SET name = '31688888888' WHERE jid = ?", (PEER,))
-    assert whatsapp.get_chat(PEER, include_last_message=False)["name"] == "31688888888"
+    assert whatsapp.get_chat(first_account(), PEER, include_last_message=False)["name"] == "31688888888"
 
 
 def test_query_matches_resolved_name(dbs):
-    chats = whatsapp.list_chats(query="Ada", limit=1)
+    chats = whatsapp.list_chats(first_account(), query="Ada", limit=1)
     assert [chat["jid"] for chat in chats] == [PEER]
 
 
 def test_name_sort_uses_resolved_name_before_pagination(dbs):
     with sqlite3.connect(dbs[0]) as conn:
         conn.execute("DELETE FROM chats WHERE jid NOT IN (?, ?)", (PEER, NAMED))
-    assert whatsapp.list_chats(sort_by="name", limit=1, page=0)[0]["name"] == "Ada Lovelace"
-    assert whatsapp.list_chats(sort_by="name", limit=1, page=1)[0]["name"] == "Bert"
+    assert whatsapp.list_chats(first_account(), sort_by="name", limit=1, page=0)[0]["name"] == "Ada Lovelace"
+    assert whatsapp.list_chats(first_account(), sort_by="name", limit=1, page=1)[0]["name"] == "Bert"
 
 
 @pytest.mark.parametrize("name", ["31699999999", "999111222333444"])
@@ -191,13 +191,13 @@ def test_self_number_repair_uses_device_identity_without_contacts(dbs, name, dro
             conn.execute("DROP TABLE whatsmeow_contacts")
     with sqlite3.connect(messages) as conn:
         conn.execute("UPDATE chats SET name = ? WHERE jid = ?", (name, PEER))
-    assert whatsapp.get_chat(PEER, include_last_message=False)["name"] == "31600000001"
+    assert whatsapp.get_chat(first_account(), PEER, include_last_message=False)["name"] == "31600000001"
 
 
 def test_missing_whatsmeow_db_is_not_fatal(dbs, monkeypatch):
     """The placeholder survives when whatsapp.db is absent."""
-    monkeypatch.setattr(whatsapp, "WHATSMEOW_DB_PATH", "/nonexistent/whatsapp.db")
-    chats = _by_jid(whatsapp.list_chats(limit=50))
+    use_default_account(monkeypatch, WHATSMEOW_DB_PATH="/nonexistent/whatsapp.db")
+    chats = _by_jid(whatsapp.list_chats(first_account(), limit=50))
     assert chats[PEER]["name"] == "31600000001"
     assert chats[NAMED]["name"] == "Bert"
 

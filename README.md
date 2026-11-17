@@ -143,6 +143,26 @@ Add to your Cursor MCP settings (`~/.cursor/mcp.json`):
 
 Messages include `sender_display` showing "Name (phone)" format for easy identification by agents.
 
+### Account Operations
+
+#### `list_accounts`
+
+List the WhatsApp accounts this server serves (see
+[Several WhatsApp numbers](#several-whatsapp-numbers-accounts-file)) and whether
+each one works. Without an accounts file there is one account, `default`.
+
+Returns one entry per account:
+
+- `name`: the account's short name.
+- `phone_number`: the account's own number, read from its `whatsapp.db`; null
+  when that store can't be read.
+- `store_available`: whether its `messages.db` exists.
+- `bridge`: `reachable`, plus the bridge's `state`, `connected`, `paired` and
+  `message` from `GET /api/connection`, or an `error` when the bridge can't be
+  asked. The pairing QR code is never returned.
+
+One unhealthy account never makes the call fail.
+
 ### Contact Operations
 
 #### `search_contacts`
@@ -487,6 +507,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSMEOW_DB_PATH`    | `../whatsapp-bridge/store/whatsapp.db`   | whatsmeow DB used for LID ↔ phone resolution |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token for bridge REST calls; also signed onto outbound webhook POSTs |
+| `WHATSAPP_ACCOUNTS_FILE` | unset | JSON accounts file for serving several WhatsApp numbers from one MCP server; see [Several WhatsApp numbers](#several-whatsapp-numbers-accounts-file) |
 | `WHATSAPP_HUB_URL` | `http://localhost:8767/ui/whatsapp` | AutoHub status/pairing page opened by macOS bridge notifications |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
@@ -711,6 +732,56 @@ and message databases are left in place.
 preserve, omit the `mv` step, create the runtime directory, and launch the built
 binary there. Pair the new device, then point the MCP server at the new databases
 and token as above. This is separate from migrating an existing installation.
+
+### Several WhatsApp numbers (accounts file)
+
+One bridge serves one WhatsApp number. To use several numbers (for example a
+personal number and a WhatsApp Business number), run one bridge per number and
+point a single MCP server at all of them with an accounts file.
+
+1. Give each bridge its own working directory, so each gets its own `store/`,
+   and its own port. For example, from two copies of the built binary:
+
+   ```bash
+   cd ~/wa/personal && WHATSAPP_BRIDGE_PORT=8081 ./whatsapp-bridge
+   cd ~/wa/work     && WHATSAPP_BRIDGE_PORT=8082 ./whatsapp-bridge
+   ```
+
+   Pair each one with its own phone (WhatsApp → Linked Devices).
+
+2. List the accounts in a JSON file:
+
+   ```json
+   [
+     {"name": "personal", "store_dir": "~/wa/personal/store", "api_url": "http://localhost:8081/api"},
+     {"name": "work", "store_dir": "~/wa/work/store", "api_url": "http://localhost:8082/api"}
+   ]
+   ```
+
+   - `name`: a short name of lowercase letters, digits and hyphens, unique in
+     the file.
+   - `store_dir`: the bridge's store folder, holding `messages.db`,
+     `whatsapp.db` and `.bridge-token`. A relative path is relative to the
+     accounts file.
+   - `api_url`: the bridge's REST base URL.
+
+   Tokens never go in this file: each account's bridge token is read from
+   `.bridge-token` in its own `store_dir`.
+
+3. Set `WHATSAPP_ACCOUNTS_FILE` to the file's path in the MCP server's
+   environment and restart it. The file is read at startup; any problem (an
+   unreadable file, invalid JSON, an empty list, a duplicate or invalid name, a
+   missing field, an unknown field, two entries sharing a `store_dir` or an
+   `api_url`) stops the server with a message naming the entry and the problem.
+
+With an accounts file, `WHATSAPP_DB_PATH`, `WHATSMEOW_DB_PATH`,
+`WHATSAPP_API_URL` and `WHATSAPP_BRIDGE_TOKEN` are not used. Without one, the
+server serves a single account named `default` built from those settings,
+exactly as before.
+
+Use `list_accounts` to check each account's number and bridge. The other tools
+currently act on the first account in the file; reading across all accounts and
+choosing the account a message goes out from are being added.
 
 ### Run automatically on macOS
 

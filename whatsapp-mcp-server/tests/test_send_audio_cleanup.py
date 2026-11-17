@@ -6,6 +6,7 @@ import os
 import pytest
 
 import whatsapp
+from tests.conftest import first_account
 
 
 class _Resp:
@@ -31,7 +32,7 @@ def test_send_audio_removes_converted_temp_file(tmp_path, monkeypatch, status_co
     monkeypatch.setattr(whatsapp.audio, "convert_to_opus_ogg_temp", fake_convert)
     monkeypatch.setattr(whatsapp.requests, "post", lambda *a, **k: _Resp(status_code=status_code))
 
-    success, _ = whatsapp.send_audio_message("12025551234", str(src))
+    success, _ = whatsapp.send_audio_message(first_account(), "12025551234", str(src))
 
     assert success is expected_success
     assert not os.path.exists(converted)
@@ -53,7 +54,7 @@ def test_send_audio_removes_converted_temp_file_after_request_exception(tmp_path
     monkeypatch.setattr(whatsapp.audio, "convert_to_opus_ogg_temp", fake_convert)
     monkeypatch.setattr(whatsapp.requests, "post", raise_request_exception)
 
-    success, message = whatsapp.send_audio_message("12025551234", str(src))
+    success, message = whatsapp.send_audio_message(first_account(), "12025551234", str(src))
 
     assert success is False
     assert message == "Request error: bridge unavailable"
@@ -67,7 +68,7 @@ def test_send_audio_leaves_native_ogg_in_place(tmp_path, monkeypatch):
     monkeypatch.setattr(whatsapp.audio, "convert_to_opus_ogg_temp", lambda p: pytest.fail("must not convert .ogg"))
     monkeypatch.setattr(whatsapp.requests, "post", lambda *a, **k: _Resp())
 
-    ok, _ = whatsapp.send_audio_message("12025551234", str(src))
+    ok, _ = whatsapp.send_audio_message(first_account(), "12025551234", str(src))
 
     assert ok is True
     assert src.exists()

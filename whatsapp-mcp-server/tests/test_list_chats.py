@@ -11,6 +11,7 @@ import sqlite3
 import pytest
 
 import whatsapp
+from tests.conftest import first_account, use_default_account
 
 
 def _make_messages_db(path):
@@ -68,13 +69,13 @@ def _make_messages_db(path):
 def messages_db(tmp_path, monkeypatch):
     db_path = tmp_path / "messages.db"
     _make_messages_db(str(db_path))
-    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(db_path))
+    use_default_account(monkeypatch, WHATSAPP_DB_PATH=str(db_path))
     return db_path
 
 
 def test_list_chats_with_last_message(messages_db):
     """Default behavior: include the joined last_message fields."""
-    chats = whatsapp.list_chats(limit=10)
+    chats = whatsapp.list_chats(first_account(), limit=10)
     assert len(chats) == 1
     assert chats[0]["jid"] == "1234567890@s.whatsapp.net"
     assert chats[0]["name"] == "Alice"
@@ -85,7 +86,7 @@ def test_list_chats_with_last_message(messages_db):
 def test_list_chats_without_last_message(messages_db):
     """Regression: include_last_message=False must not error and must
     still return the chat row without the last message's content."""
-    chats = whatsapp.list_chats(limit=10, include_last_message=False)
+    chats = whatsapp.list_chats(first_account(), limit=10, include_last_message=False)
     assert len(chats) == 1
     assert chats[0]["jid"] == "1234567890@s.whatsapp.net"
     assert chats[0]["name"] == "Alice"
@@ -98,8 +99,8 @@ def test_list_chats_without_last_message(messages_db):
 def test_list_chats_hides_metadata_only_rows(messages_db):
     with sqlite3.connect(messages_db) as conn:
         conn.execute("INSERT INTO chats (jid) VALUES ('metadata@s.whatsapp.net')")
-    assert len(whatsapp.list_chats()) == 1
-    assert whatsapp.list_chats(query="metadata") == []
+    assert len(whatsapp.list_chats(first_account())) == 1
+    assert whatsapp.list_chats(first_account(), query="metadata") == []
 
 
 def test_list_chats_keeps_reaction_only_rows(messages_db):
@@ -108,22 +109,22 @@ def test_list_chats_keeps_reaction_only_rows(messages_db):
         conn.execute(
             "INSERT INTO messages (id, chat_jid, media_type) VALUES ('r', 'reaction@s.whatsapp.net', 'reaction')"
         )
-    assert len(whatsapp.list_chats()) == 2
+    assert len(whatsapp.list_chats(first_account())) == 2
 
 
 def test_list_chats_query_filter_with_include_last_message_false(messages_db):
     """Filter by query while not including the last message — both code paths
     should compose cleanly."""
-    chats = whatsapp.list_chats(query="Alice", include_last_message=False)
+    chats = whatsapp.list_chats(first_account(), query="Alice", include_last_message=False)
     assert len(chats) == 1
     assert chats[0]["name"] == "Alice"
 
-    chats = whatsapp.list_chats(query="Bob", include_last_message=False)
+    chats = whatsapp.list_chats(first_account(), query="Bob", include_last_message=False)
     assert chats == []
 
 
 def test_get_chat_with_last_message(messages_db):
-    chat = whatsapp.get_chat("1234567890@s.whatsapp.net")
+    chat = whatsapp.get_chat(first_account(), "1234567890@s.whatsapp.net")
     assert chat is not None
     assert chat["name"] == "Alice"
     assert chat["last_message"] == "hello world"
@@ -131,7 +132,7 @@ def test_get_chat_with_last_message(messages_db):
 
 def test_get_chat_without_last_message(messages_db):
     """Regression: same bug existed in get_chat."""
-    chat = whatsapp.get_chat("1234567890@s.whatsapp.net", include_last_message=False)
+    chat = whatsapp.get_chat(first_account(), "1234567890@s.whatsapp.net", include_last_message=False)
     assert chat is not None
     assert chat["name"] == "Alice"
     assert chat["last_message"] is None
@@ -140,8 +141,8 @@ def test_get_chat_without_last_message(messages_db):
 
 
 def test_get_chat_missing_jid_returns_none(messages_db):
-    assert whatsapp.get_chat("nonexistent@s.whatsapp.net") is None
-    assert whatsapp.get_chat("nonexistent@s.whatsapp.net", include_last_message=False) is None
+    assert whatsapp.get_chat(first_account(), "nonexistent@s.whatsapp.net") is None
+    assert whatsapp.get_chat(first_account(), "nonexistent@s.whatsapp.net", include_last_message=False) is None
 
 
 def test_get_contact_chats_returns_each_chat_once_with_last_message(messages_db):
@@ -185,7 +186,7 @@ def test_get_contact_chats_returns_each_chat_once_with_last_message(messages_db)
     conn.commit()
     conn.close()
 
-    chats = whatsapp.get_contact_chats("1234567890@s.whatsapp.net")
+    chats = whatsapp.get_contact_chats(first_account(), "1234567890@s.whatsapp.net")
     group_chats = [chat for chat in chats if chat["jid"] == "group-1@g.us"]
 
     assert len(group_chats) == 1
