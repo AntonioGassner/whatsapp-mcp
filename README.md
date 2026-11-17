@@ -826,11 +826,11 @@ each store under the other number's chat, so the chat tells the two sides
 apart. When several accounts hold the message (one in a group two of your
 numbers are in), `account` is required and the error names those accounts; when
 none does, `account` is required and the error lists the valid names. Naming an
-account that doesn't hold the message is refused. Either way nothing reaches a bridge until the account is settled, and
-the call goes to that account's bridge with that account's token. Reactions,
-receipts and replies report `account` and `account_phone_number`; media and
-transcript results report `account`. A transcript is stored in, and later
-served from, that account's store only.
+account that doesn't hold the message is refused. Nothing reaches a bridge
+until the account is settled, and the call goes to that account's bridge with
+that account's token. Reactions, receipts and replies report `account` and
+`account_phone_number`; media and transcript results report `account`. A
+transcript is stored in, and later served from, that account's store only.
 
 ### Run automatically on macOS
 

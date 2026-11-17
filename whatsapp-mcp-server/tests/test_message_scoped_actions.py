@@ -260,13 +260,11 @@ def test_write_result_names_the_account_and_its_own_number(two_accounts, act, me
     assert result["account_phone_number"] == NUMBERS[holder]
 
 
-def test_download_result_names_the_account(two_accounts, bridge):
-    voice = bridge.ports[8082]._payload["path"]
-
+def test_download_result_names_the_account(two_accounts, tmp_path):
     assert main.download_media("w1", BOB) == {
         "success": True,
         "message": "Media downloaded successfully",
-        "file_path": voice,
+        "file_path": str(tmp_path / "voice.ogg"),
         "account": "work",
     }
 
