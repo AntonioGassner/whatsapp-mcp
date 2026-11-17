@@ -24,6 +24,7 @@ whatsapp-mcp/
 ├── whatsapp-mcp-server/    # Python MCP server — exposes tools to AI clients
 │   ├── main.py             # FastMCP tool definitions
 │   ├── whatsapp.py         # DB queries + bridge HTTP client
+│   ├── accounts.py         # Account registry: accounts file or the implicit default
 │   └── audio.py            # FFmpeg helpers
 └── .github/                # CI, release, security workflows
 ```
@@ -83,7 +84,8 @@ For PR creation, hosted review, CI, and merge readiness, use the installed `baby
 | `WHATSMEOW_DB_PATH` | `../whatsapp-bridge/store/whatsapp.db` | whatsmeow SQLite (LID ↔ phone resolution via `whatsmeow_lid_map`) |
 | `WHATSAPP_API_URL` | `http://localhost:8080/api` | Bridge REST endpoint |
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge binds to |
-| `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls |
+| `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls (implicit `default` account only) |
+| `WHATSAPP_ACCOUNTS_FILE` | unset | JSON list of accounts (`name`, `store_dir`, `api_url`), one per bridge. When set, the four settings above are ignored and each account's token comes from its `store_dir`; an invalid file stops the server at startup |
 | `WHATSAPP_HUB_URL` | `http://localhost:8767/ui/whatsapp` | AutoHub status/pairing page opened by macOS bridge notifications |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default) | Linked-device label shown in WhatsApp > Linked Devices. Applied at pair time only (`store.DeviceProps.Os`); re-pair to change |
@@ -121,6 +123,7 @@ When adding a new env var: document it here, in `README.md`, and in `.env.exampl
 |---|---|
 | Add or modify an MCP tool | `whatsapp-mcp-server/main.py` |
 | Change DB queries / data conversion | `whatsapp-mcp-server/whatsapp.py` |
+| Change how accounts are configured | `whatsapp-mcp-server/accounts.py` |
 | Change bridge REST API or event handling | `whatsapp-bridge/main.go` |
 | Change webhook payload | `whatsapp-bridge/webhook.go` |
 | Change CI behavior | `.github/workflows/*.yml` |
