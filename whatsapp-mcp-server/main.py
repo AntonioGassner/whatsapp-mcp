@@ -326,8 +326,9 @@ def get_contact(
         account: Account to look in (see list_accounts); omit to look in every account
 
     Returns:
-        Dictionary with jid, name, display_name, is_lid, and resolved status. An
-        unresolved contact (resolved false) carries no `account` field.
+        Dictionary with jid, name, display_name, is_lid, and resolved status. A
+        contact no account knows (no chat with it, no name for it) carries no
+        `account` field.
     """
     if identifier is None:
         identifier = phone_number
@@ -600,7 +601,7 @@ def get_last_interaction(jid: str, account: AccountName = None) -> dict[str, Any
     """
     match = _look_up(
         accounts.registry().select(account),
-        lambda target: whatsapp_get_last_interaction(target, jid) or None,
+        lambda target: whatsapp_get_last_interaction(target, jid),
         lambda _target, message: message["timestamp"],
     )
     return _located(*match) if match else {}
