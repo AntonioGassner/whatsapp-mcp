@@ -771,8 +771,8 @@ point a single MCP server at all of them with an accounts file.
 3. Set `WHATSAPP_ACCOUNTS_FILE` to the file's path in the MCP server's
    environment and restart it. The file is read at startup; any problem (an
    unreadable file, invalid JSON, an empty list, a duplicate or invalid name, a
-   missing field, an unknown field) stops the server with a message naming the
-   entry and the problem.
+   missing field, an unknown field, two entries sharing a `store_dir` or an
+   `api_url`) stops the server with a message naming the entry and the problem.
 
 With an accounts file, `WHATSAPP_DB_PATH`, `WHATSMEOW_DB_PATH`,
 `WHATSAPP_API_URL` and `WHATSAPP_BRIDGE_TOKEN` are not used. Without one, the

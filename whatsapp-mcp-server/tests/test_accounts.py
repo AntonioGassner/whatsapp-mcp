@@ -164,6 +164,20 @@ VALID = {"name": "work", "store_dir": "work", "api_url": "http://localhost:8082/
             id="duplicate-name",
         ),
         pytest.param(
+            json.dumps(
+                [VALID, {**VALID, "name": "personal", "store_dir": "./work/", "api_url": "http://localhost:8081/api"}]
+            ),
+            r"entry 2 \('personal'\) repeats the store_dir .* of entry 1",
+            id="shared-store-dir",
+        ),
+        pytest.param(
+            json.dumps(
+                [VALID, {**VALID, "name": "personal", "store_dir": "personal", "api_url": VALID["api_url"] + "/"}]
+            ),
+            r"entry 2 \('personal'\) repeats the api_url 'http://localhost:8082/api' of entry 1",
+            id="shared-api-url",
+        ),
+        pytest.param(
             json.dumps([{**VALID, "name": "Work Phone"}]),
             r"entry 1 \('Work Phone'\) has an invalid name",
             id="invalid-name",

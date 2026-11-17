@@ -85,7 +85,7 @@ For PR creation, hosted review, CI, and merge readiness, use the installed `baby
 | `WHATSAPP_API_URL` | `http://localhost:8080/api` | Bridge REST endpoint |
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge binds to |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls (implicit `default` account only) |
-| `WHATSAPP_ACCOUNTS_FILE` | unset | JSON list of accounts (`name`, `store_dir`, `api_url`), one per bridge. When set, the four settings above are ignored and each account's token comes from its `store_dir`; an invalid file stops the server at startup |
+| `WHATSAPP_ACCOUNTS_FILE` | unset | JSON list of accounts (`name`, `store_dir`, `api_url`), one per bridge. When set, `WHATSAPP_DB_PATH`, `WHATSMEOW_DB_PATH`, `WHATSAPP_API_URL` and `WHATSAPP_BRIDGE_TOKEN` are ignored and each account's token comes from its `store_dir`; an invalid file stops the server at startup |
 | `WHATSAPP_HUB_URL` | `http://localhost:8767/ui/whatsapp` | AutoHub status/pairing page opened by macOS bridge notifications |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default) | Linked-device label shown in WhatsApp > Linked Devices. Applied at pair time only (`store.DeviceProps.Os`); re-pair to change |

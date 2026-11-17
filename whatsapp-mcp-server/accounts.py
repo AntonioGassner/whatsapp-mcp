@@ -122,7 +122,7 @@ def _account_from_entry(index: int, entry: object, base_dir: str, path: str) -> 
 
     # A relative store_dir is relative to the accounts file, not to wherever the
     # MCP client happened to launch the server from.
-    store_dir = os.path.join(base_dir, os.path.expanduser(entry["store_dir"].strip()))
+    store_dir = os.path.normpath(os.path.join(base_dir, os.path.expanduser(entry["store_dir"].strip())))
     return Account(
         name=name,
         messages_db_path=os.path.join(store_dir, "messages.db"),
@@ -150,15 +150,24 @@ def _load_accounts_file(path: str) -> Registry:
         raise AccountsFileError(f"Accounts file {path} lists no accounts; add at least one")
 
     base_dir = os.path.dirname(os.path.abspath(path))
-    seen: dict[str, int] = {}
+    seen: dict[tuple[str, str], int] = {}
     loaded = []
     for index, entry in enumerate(entries, start=1):
         account = _account_from_entry(index, entry, base_dir, path)
-        if account.name in seen:
-            raise AccountsFileError(
-                f"Accounts file {path}: {_entry_label(index, entry)} repeats the name {account.name!r} of entry {seen[account.name]}"
-            )
-        seen[account.name] = index
+        store_dir = os.path.dirname(account.messages_db_path)
+        # A shared store or bridge would read one number's messages as another's,
+        # or send one account's bridge token to another account's bridge.
+        for field, value, key in (
+            ("name", account.name, account.name),
+            ("store_dir", store_dir, os.path.normcase(store_dir)),
+            ("api_url", account.api_url, account.api_url),
+        ):
+            if (field, key) in seen:
+                raise AccountsFileError(
+                    f"Accounts file {path}: {_entry_label(index, entry)} repeats the {field} {value!r} "
+                    f"of entry {seen[field, key]}"
+                )
+            seen[field, key] = index
         loaded.append(account)
     return Registry(accounts=tuple(loaded))
 
