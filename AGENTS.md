@@ -24,6 +24,7 @@ whatsapp-mcp/
 ├── whatsapp-mcp-server/    # Python MCP server — exposes tools to AI clients
 │   ├── main.py             # FastMCP tool definitions
 │   ├── whatsapp.py         # DB queries + bridge HTTP client
+│   ├── accounts.py         # Account registry: accounts file or the implicit default
 │   └── audio.py            # FFmpeg helpers
 └── .github/                # CI, release, security workflows
 ```
@@ -71,26 +72,9 @@ uv run ruff check .         # lint
 uv run ruff format .        # format
 ```
 
-## CI gates
+## PR review and CI
 
-Every PR runs (see `.github/workflows/`). Not every job is blocking today:
-
-**Blocking — must be green to merge:**
-
-- `Python Lint` (`ruff check` + `ruff format --check`)
-- `Python Tests` (`pytest`)
-- `Go Lint` (`golangci-lint`)
-- `Go Build`
-- `Version Consistency` (Python pkg version vs `.release-please-manifest.json`)
-- `CodeQL Analysis (Python | Go)`
-
-**Informational — runs on every PR but won't fail the build today (`continue-on-error: true`):**
-
-- `Bandit Security Scan`
-- `Python Dependency Audit` (`pip-audit`)
-- `Go Vulnerability Check` (`govulncheck`)
-
-A failing blocking job is a hard block — fix it or explain in the PR why it's unrelated. For informational scans, investigate findings and either fix them or note in the PR why they're acceptable.
+For PR creation, hosted review, CI, and merge readiness, use the installed `babysit` skill (`~/.autovault/skills/babysit/SKILL.md`) as the canonical procedure.
 
 ## Environment variables
 
@@ -100,7 +84,9 @@ A failing blocking job is a hard block — fix it or explain in the PR why it's 
 | `WHATSMEOW_DB_PATH` | `../whatsapp-bridge/store/whatsapp.db` | whatsmeow SQLite (LID ↔ phone resolution via `whatsmeow_lid_map`) |
 | `WHATSAPP_API_URL` | `http://localhost:8080/api` | Bridge REST endpoint |
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Port the bridge binds to |
-| `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls |
+| `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token required for bridge REST calls (implicit `default` account only) |
+| `WHATSAPP_ACCOUNTS_FILE` | unset | JSON list of accounts (`name`, `store_dir`, `api_url`), one per bridge. When set, `WHATSAPP_DB_PATH`, `WHATSMEOW_DB_PATH`, `WHATSAPP_API_URL` and `WHATSAPP_BRIDGE_TOKEN` are ignored and each account's token comes from its `store_dir`; an invalid file stops the server at startup |
+| `WHATSAPP_HUB_URL` | `http://localhost:8767/ui/whatsapp` | AutoHub status/pairing page opened by macOS bridge notifications |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox` | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default) | Linked-device label shown in WhatsApp > Linked Devices. Applied at pair time only (`store.DeviceProps.Os`); re-pair to change |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio` | MCP transport to serve clients: `stdio`, `http`, or `sse` |
@@ -137,6 +123,7 @@ When adding a new env var: document it here, in `README.md`, and in `.env.exampl
 |---|---|
 | Add or modify an MCP tool | `whatsapp-mcp-server/main.py` |
 | Change DB queries / data conversion | `whatsapp-mcp-server/whatsapp.py` |
+| Change how accounts are configured | `whatsapp-mcp-server/accounts.py` |
 | Change bridge REST API or event handling | `whatsapp-bridge/main.go` |
 | Change webhook payload | `whatsapp-bridge/webhook.go` |
 | Change CI behavior | `.github/workflows/*.yml` |

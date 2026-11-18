@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import pytest
 
 import transcription
+from tests.conftest import first_account, use_default_account
 
 
 @pytest.fixture(autouse=True)
@@ -282,7 +283,7 @@ def test_tool_dispatches_stores_and_reuses_chat_scoped_transcript(db, http_provi
     import main
 
     audio, post, _response = http_provider
-    monkeypatch.setattr(main, "MESSAGES_DB_PATH", db)
+    use_default_account(monkeypatch, WHATSAPP_DB_PATH=db)
     download = Mock(return_value=str(audio))
     monkeypatch.setattr(main, "whatsapp_download_media", download)
     transcription.store_transcript(db, "voice1", "other@g.us", "wrong chat", "m.bin")
@@ -293,7 +294,7 @@ def test_tool_dispatches_stores_and_reuses_chat_scoped_transcript(db, http_provi
     assert post.call_args.kwargs["headers"] == {}
     monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROVIDER", "unavailable")
     assert main.transcribe_audio("voice1", "chat@g.us")["transcript"] == result["transcript"]
-    download.assert_called_once_with("voice1", "chat@g.us")
+    download.assert_called_once_with(first_account(), "voice1", "chat@g.us")
     monkeypatch.setenv("WHATSAPP_TRANSCRIPTION_PROVIDER", "openai_compatible")
     assert main.transcribe_audio("voice1", "chat@g.us", force=True)["success"]
     assert post.call_count == 2

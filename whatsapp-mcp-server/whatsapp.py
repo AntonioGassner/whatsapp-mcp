@@ -10,24 +10,11 @@ from typing import Any
 import requests
 
 import audio
-
-# Configuration via environment variables with sensible defaults
-_DEFAULT_BRIDGE_STORE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp-bridge", "store")
-MESSAGES_DB_PATH = os.getenv(
-    "WHATSAPP_DB_PATH",
-    os.path.join(_DEFAULT_BRIDGE_STORE_DIR, "messages.db"),
-)
-WHATSMEOW_DB_PATH = os.getenv(
-    "WHATSMEOW_DB_PATH",
-    os.path.join(_DEFAULT_BRIDGE_STORE_DIR, "whatsapp.db"),
-)
-WHATSAPP_API_BASE_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api")
-
-_BRIDGE_TOKEN_PATH = os.path.join(os.path.dirname(WHATSMEOW_DB_PATH), ".bridge-token")
+from accounts import Account
 
 
-def _connect_messages_db() -> sqlite3.Connection:
-    """Open messages.db read-only, refusing to invent it.
+def _connect_messages_db(account: Account) -> sqlite3.Connection:
+    """Open the account's messages.db read-only, refusing to invent it.
 
     sqlite3.connect() silently creates an empty database when the path is
     wrong, and every read path here maps sqlite3.Error to an empty result, so
@@ -37,37 +24,15 @@ def _connect_messages_db() -> sqlite3.Connection:
     an actionable message. SQLite's mode=ro prevents both database creation
     and writes, even if the path disappears before the connection opens.
     """
-    path = Path(MESSAGES_DB_PATH).resolve()
+    path = Path(account.messages_db_path).resolve()
     try:
         return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
     except sqlite3.OperationalError as exc:
         if not path.is_file():
             raise FileNotFoundError(
-                f"WhatsApp messages database not found at {MESSAGES_DB_PATH}. "
-                "Start the bridge once so it creates the store, or point WHATSAPP_DB_PATH at it."
+                f"WhatsApp messages database not found at {account.messages_db_path}. {account.missing_store_hint}"
             ) from exc
         raise
-
-
-def _read_bridge_token() -> str | None:
-    env = os.getenv("WHATSAPP_BRIDGE_TOKEN", "").strip()
-    if env:
-        return env
-    try:
-        with open(_BRIDGE_TOKEN_PATH, encoding="utf-8") as fh:
-            value = fh.read().strip()
-            return value or None
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return None
-
-
-def _bridge_headers() -> dict[str, str]:
-    token = _read_bridge_token()
-    if not token:
-        return {}
-    return {"Authorization": f"Bearer {token}"}
 
 
 @dataclass
@@ -134,6 +99,10 @@ class Contact:
     jid: str
 
 
+class MessageNotFoundError(ValueError):
+    """The account's store has no message with this ID."""
+
+
 @dataclass
 class MessageContext:
     message: Message
@@ -141,7 +110,7 @@ class MessageContext:
     after: list[Message]
 
 
-def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str, Any]:
+def msg_to_dict(account: Account, message: Message, include_sender_name: bool = True) -> dict[str, Any]:
     """Convert a Message dataclass to a dictionary for JSON serialization."""
     # Extract phone number from JID (e.g., "1234567890@s.whatsapp.net" -> "1234567890")
     sender_phone = message.sender.split("@")[0] if "@" in message.sender else message.sender
@@ -153,7 +122,7 @@ def msg_to_dict(message: Message, include_sender_name: bool = True) -> dict[str,
             sender_name = "Me"
             sender_display = "Me"
         else:
-            resolved_name = get_sender_name(message.sender)
+            resolved_name = get_sender_name(account, message.sender)
             # Check if we got an actual name (not just the JID back)
             if resolved_name and resolved_name != message.sender and resolved_name != sender_phone:
                 sender_name = resolved_name
@@ -229,7 +198,7 @@ def _last_message_join(chat_alias: str, msg_alias: str) -> str:
     """
 
 
-def _sender_aliases(value: str) -> list[str]:
+def _sender_aliases(account: Account, value: str) -> list[str]:
     # messages.sender is written inconsistently: the same contact may appear as
     # bare phone ("13232432100"), full phone JID ("13232432100@s.whatsapp.net"),
     # bare LID ("231241139937355"), or full LID JID ("231241139937355@lid").
@@ -238,9 +207,9 @@ def _sender_aliases(value: str) -> list[str]:
     bare = value.split("@", 1)[0]
     pn: str | None = None
     lid: str | None = None
-    if os.path.isfile(WHATSMEOW_DB_PATH):
+    if os.path.isfile(account.whatsmeow_db_path):
         try:
-            conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+            conn = sqlite3.connect(account.whatsmeow_db_path)
             try:
                 row = conn.execute("SELECT lid FROM whatsmeow_lid_map WHERE pn = ?", (bare,)).fetchone()
                 if row:
@@ -266,7 +235,7 @@ def _sender_aliases(value: str) -> list[str]:
     return aliases
 
 
-def _resolve_lid_to_phone(lid_or_jid: str) -> str | None:
+def _resolve_lid_to_phone(account: Account, lid_or_jid: str) -> str | None:
     """Resolve a WhatsApp LID (linked device identifier) to a phone number.
 
     WhatsApp's newer protocol uses opaque LIDs (e.g. '35047067385985') as sender
@@ -275,12 +244,12 @@ def _resolve_lid_to_phone(lid_or_jid: str) -> str | None:
 
     Returns the phone number if found, None otherwise.
     """
-    if not os.path.exists(WHATSMEOW_DB_PATH):
+    if not os.path.exists(account.whatsmeow_db_path):
         return None
     # Extract the numeric part from JID-style strings (e.g. '35047067385985@lid')
     lid = lid_or_jid.split("@")[0] if "@" in lid_or_jid else lid_or_jid
     try:
-        conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+        conn = sqlite3.connect(account.whatsmeow_db_path)
         cursor = conn.cursor()
         cursor.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ? LIMIT 1", (lid,))
         row = cursor.fetchone()
@@ -292,7 +261,7 @@ def _resolve_lid_to_phone(lid_or_jid: str) -> str | None:
             conn.close()
 
 
-def _resolve_name_from_whatsmeow(jid: str) -> str | None:
+def _resolve_name_from_whatsmeow(account: Account, jid: str) -> str | None:
     """Look up a contact name from whatsmeow's contact store (whatsapp.db).
 
     Handles both standard JIDs (12345@s.whatsapp.net) and LIDs (opaque numeric
@@ -301,7 +270,7 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
 
     Falls back gracefully if the DB or table doesn't exist.
     """
-    if not os.path.exists(WHATSMEOW_DB_PATH):
+    if not os.path.exists(account.whatsmeow_db_path):
         return None
 
     lookup_jid = jid
@@ -312,7 +281,7 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
     # LIDs overlap in length with phone numbers (12-15 digits) so we always
     # attempt LID resolution and fall through to direct contact lookup if not found.
     if jid_suffix in ("lid", ""):
-        phone = _resolve_lid_to_phone(jid_prefix)
+        phone = _resolve_lid_to_phone(account, jid_prefix)
         if phone:
             lookup_jid = phone + "@s.whatsapp.net"
         elif jid_suffix == "lid":
@@ -320,7 +289,7 @@ def _resolve_name_from_whatsmeow(jid: str) -> str | None:
             return None
 
     try:
-        conn = sqlite3.connect(WHATSMEOW_DB_PATH)
+        conn = sqlite3.connect(account.whatsmeow_db_path)
         cursor = conn.cursor()
         # whatsmeow_contacts columns: our_jid, their_jid, first_name, full_name, push_name, business_name
         cursor.execute(
@@ -352,7 +321,7 @@ def _is_placeholder_chat_name(jid: str, name: str | None) -> bool:
     return name == bare or name == f"Group {bare}"
 
 
-def _display_chat_name(jid: str, stored_name: str | None) -> str | None:
+def _display_chat_name(account: Account, jid: str, stored_name: str | None) -> str | None:
     """Return the best display name for a chat.
 
     messages.db is the source of truth and is used as-is whenever it holds a
@@ -365,21 +334,21 @@ def _display_chat_name(jid: str, stored_name: str | None) -> str | None:
     gated on the placeholder check rather than run for every row.
     """
     placeholder = _is_placeholder_chat_name(jid, stored_name)
-    wrong_self_name = not placeholder and _is_stored_self_name(jid, stored_name)
+    wrong_self_name = not placeholder and _is_stored_self_name(account, jid, stored_name)
     if not placeholder and not wrong_self_name:
         return stored_name
     fallback = jid.split("@")[0] if wrong_self_name else stored_name
-    return _resolve_name_from_whatsmeow(jid) or fallback
+    return _resolve_name_from_whatsmeow(account, jid) or fallback
 
 
-def _is_stored_self_name(jid: str, name: str | None) -> bool:
+def _is_stored_self_name(account: Account, jid: str, name: str | None) -> bool:
     """Recognize outgoing-first DM names cached as our own account number."""
     user, _, server = jid.partition("@")
     if server not in ("s.whatsapp.net", "lid") or not name or not name.isdecimal() or user == name:
         return False
     conn = None
     try:
-        conn = sqlite3.connect(Path(WHATSMEOW_DB_PATH).resolve().as_uri() + "?mode=ro", uri=True)
+        conn = sqlite3.connect(Path(account.whatsmeow_db_path).resolve().as_uri() + "?mode=ro", uri=True)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(whatsmeow_device)")}
         fields = [field for field in ("jid", "lid") if field in columns]
         own_jids = []
@@ -394,8 +363,8 @@ def _is_stored_self_name(jid: str, name: str | None) -> bool:
             # Compatibility with stores that predate the device identity table.
             own_jids = [row[0] for row in conn.execute("SELECT DISTINCT our_jid FROM whatsmeow_contacts") if row[0]]
         own_users = {jid.split("@")[0].split(":")[0].split(".")[0] for jid in own_jids}
-        peer = (_resolve_lid_to_phone(user) or user) if server == "lid" else user
-        named_user = _resolve_lid_to_phone(name) or name
+        peer = (_resolve_lid_to_phone(account, user) or user) if server == "lid" else user
+        named_user = _resolve_lid_to_phone(account, name) or name
         return named_user in own_users and peer not in own_users
     except sqlite3.Error:
         return False
@@ -409,9 +378,9 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def get_sender_name(sender_jid: str) -> str:
+def get_sender_name(account: Account, sender_jid: str) -> str:
     try:
-        conn = _connect_messages_db()
+        conn = _connect_messages_db(account)
         cursor = conn.cursor()
 
         # First try matching by exact JID
@@ -453,13 +422,13 @@ def get_sender_name(sender_jid: str) -> str:
             return result[0]
 
         # Fall back to whatsmeow contact store
-        whatsmeow_name = _resolve_name_from_whatsmeow(sender_jid)
+        whatsmeow_name = _resolve_name_from_whatsmeow(account, sender_jid)
         if whatsmeow_name:
             return whatsmeow_name
 
         # Try with @s.whatsapp.net suffix if bare number
         if "@" not in sender_jid:
-            whatsmeow_name = _resolve_name_from_whatsmeow(sender_jid + "@s.whatsapp.net")
+            whatsmeow_name = _resolve_name_from_whatsmeow(account, sender_jid + "@s.whatsapp.net")
             if whatsmeow_name:
                 return whatsmeow_name
 
@@ -475,7 +444,7 @@ def get_sender_name(sender_jid: str) -> str:
             conn.close()
 
 
-def format_message(message: Message, show_chat_info: bool = True) -> None:
+def format_message(account: Account, message: Message, show_chat_info: bool = True) -> None:
     """Print a single message with consistent formatting."""
     output = ""
 
@@ -489,25 +458,26 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
         content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
 
     try:
-        sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
+        sender_name = get_sender_name(account, message.sender) if not message.is_from_me else "Me"
         output += f"From: {sender_name}: {content_prefix}{message.content}\n"
     except Exception as e:
         print(f"Error formatting message: {e}")
     return output
 
 
-def format_messages_list(messages: list[Message], show_chat_info: bool = True) -> None:
+def format_messages_list(account: Account, messages: list[Message], show_chat_info: bool = True) -> None:
     output = ""
     if not messages:
         output += "No messages to display."
         return output
 
     for message in messages:
-        output += format_message(message, show_chat_info)
+        output += format_message(account, message, show_chat_info)
     return output
 
 
 def list_messages(
+    account: Account,
     after: str | None = None,
     before: str | None = None,
     sender_phone_number: str | None = None,
@@ -539,7 +509,38 @@ def list_messages(
         List of message dictionaries with id, timestamp, sender, content, etc.
     """
     try:
-        conn = _connect_messages_db()
+        matches = find_messages(
+            account,
+            after=after,
+            before=before,
+            sender_phone_number=sender_phone_number,
+            chat_jid=chat_jid,
+            query=query,
+            limit=limit,
+            page=page,
+            sort_by=sort_by,
+        )
+        rows = with_context([(account, msg) for msg in matches], include_context, context_before, context_after)
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        return []
+    return [msg_to_dict(account, msg) for _, msg in rows]
+
+
+def find_messages(
+    account: Account,
+    after: str | None = None,
+    before: str | None = None,
+    sender_phone_number: str | None = None,
+    chat_jid: str | None = None,
+    query: str | None = None,
+    limit: int = 20,
+    page: int = 0,
+    sort_by: str = "newest",
+) -> list[Message]:
+    """The messages list_messages matches, in its order, without context."""
+    try:
+        conn = _connect_messages_db(account)
         cursor = conn.cursor()
 
         # Build base query
@@ -570,7 +571,7 @@ def list_messages(
             params.append(before)
 
         if sender_phone_number:
-            aliases = _sender_aliases(sender_phone_number)
+            aliases = _sender_aliases(account, sender_phone_number)
             placeholders = ",".join("?" * len(aliases))
             where_clauses.append(f"messages.sender IN ({placeholders})")
             params.extend(aliases)
@@ -613,29 +614,7 @@ def list_messages(
                 filename=msg[9] if len(msg) > 9 else None,
             )
             result.append(message)
-
-        if include_context and result:
-            # Add context for each message, deduplicated by message ID
-            seen_ids = set()
-            messages_with_context = []
-            for msg in result:
-                context = get_message_context(msg.id, context_before, context_after)
-                for ctx_msg in context.before:
-                    if ctx_msg.id not in seen_ids:
-                        seen_ids.add(ctx_msg.id)
-                        messages_with_context.append(ctx_msg)
-                if context.message.id not in seen_ids:
-                    seen_ids.add(context.message.id)
-                    messages_with_context.append(context.message)
-                for ctx_msg in context.after:
-                    if ctx_msg.id not in seen_ids:
-                        seen_ids.add(ctx_msg.id)
-                        messages_with_context.append(ctx_msg)
-
-            return [msg_to_dict(msg) for msg in messages_with_context]
-
-        # Return messages without context
-        return [msg_to_dict(msg) for msg in result]
+        return result
 
     except sqlite3.Error as e:
         print(f"Database error: {e}")
@@ -645,10 +624,31 @@ def list_messages(
             conn.close()
 
 
-def get_message_context(message_id: str, before: int = 5, after: int = 5) -> MessageContext:
+def with_context(
+    matches: list[tuple[Account, Message]], include_context: bool, context_before: int, context_after: int
+) -> list[tuple[Account, Message]]:
+    """Surround each match with its neighbours from the same chat and account, listing each message once.
+
+    Raises:
+        sqlite3.Error: when an account's database can't be read.
+    """
+    if not include_context:
+        return matches
+    seen: set[tuple[str, str]] = set()
+    rows = []
+    for account, msg in matches:
+        context = get_message_context(account, msg.id, context_before, context_after)
+        for ctx_msg in (*context.before, context.message, *context.after):
+            if (account.name, ctx_msg.id) not in seen:
+                seen.add((account.name, ctx_msg.id))
+                rows.append((account, ctx_msg))
+    return rows
+
+
+def get_message_context(account: Account, message_id: str, before: int = 5, after: int = 5) -> MessageContext:
     """Get context around a specific message."""
     try:
-        conn = _connect_messages_db()
+        conn = _connect_messages_db(account)
         cursor = conn.cursor()
 
         # Get the target message first
@@ -664,7 +664,7 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
         msg_data = cursor.fetchone()
 
         if not msg_data:
-            raise ValueError(f"Message with ID {message_id} not found")
+            raise MessageNotFoundError(f"Message with ID {message_id} not found")
 
         target_message = Message(
             timestamp=datetime.fromisoformat(msg_data[0]),
@@ -750,6 +750,7 @@ def get_message_context(message_id: str, before: int = 5, after: int = 5) -> Mes
 
 
 def list_chats(
+    account: Account,
     query: str | None = None,
     limit: int = 20,
     page: int = 0,
@@ -762,7 +763,7 @@ def list_chats(
         List of chat dictionaries with jid, name, is_group, last_message, etc.
     """
     try:
-        conn = _connect_messages_db()
+        conn = _connect_messages_db(account)
         cursor = conn.cursor()
 
         names: dict[tuple[str, str | None], str | None] = {}
@@ -770,7 +771,7 @@ def list_chats(
         def name_for_chat(jid, stored_name):
             key = (jid, stored_name)
             if key not in names:
-                names[key] = _display_chat_name(jid, stored_name)
+                names[key] = _display_chat_name(account, jid, stored_name)
             return names[key]
 
         # Resolve before filtering/sorting/pagination, using the same cached
@@ -857,7 +858,7 @@ def list_chats(
             conn.close()
 
 
-def search_contacts(query: str) -> list[dict[str, Any]]:
+def search_contacts(account: Account, query: str) -> list[dict[str, Any]]:
     """Search contacts by name or phone number.
 
     Searches both the messages.db chats table and whatsmeow's contact store
@@ -871,7 +872,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
 
     # 1) Search messages.db chats table (existing behavior)
     try:
-        conn = _connect_messages_db()
+        conn = _connect_messages_db(account)
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -897,9 +898,9 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
             conn.close()
 
     # 2) Search whatsmeow contact store (whatsapp.db)
-    if os.path.exists(WHATSMEOW_DB_PATH):
+    if os.path.exists(account.whatsmeow_db_path):
         try:
-            conn2 = sqlite3.connect(WHATSMEOW_DB_PATH)
+            conn2 = sqlite3.connect(account.whatsmeow_db_path)
             cursor2 = conn2.cursor()
             cursor2.execute(
                 """
@@ -930,7 +931,7 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
     return result
 
 
-def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
+def get_contact_chats(account: Account, jid: str, limit: int = 20, page: int = 0) -> list[dict[str, Any]]:
     """Get all chats involving the contact.
 
     Args:
@@ -939,10 +940,10 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
         page: Page number for pagination (default 0)
     """
     try:
-        conn = _connect_messages_db()
+        conn = _connect_messages_db(account)
         cursor = conn.cursor()
 
-        aliases = _sender_aliases(jid)
+        aliases = _sender_aliases(account, jid)
         placeholders = ",".join("?" * len(aliases))
         cursor.execute(
             f"""
@@ -974,7 +975,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
         for chat_data in chats:
             chat = Chat(
                 jid=chat_data[0],
-                name=_display_chat_name(chat_data[0], chat_data[1]),
+                name=_display_chat_name(account, chat_data[0], chat_data[1]),
                 last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
                 last_message=chat_data[3],
                 last_sender=chat_data[4],
@@ -993,7 +994,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> list[dict[str
             conn.close()
 
 
-def get_last_interaction(jid: str) -> dict[str, Any] | None:
+def get_last_interaction(account: Account, jid: str) -> dict[str, Any] | None:
     """Get most recent message involving the contact.
 
     Args:
@@ -1003,10 +1004,10 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
         Message dictionary or None if no messages found
     """
     try:
-        conn = _connect_messages_db()
+        conn = _connect_messages_db(account)
         cursor = conn.cursor()
 
-        aliases = _sender_aliases(jid)
+        aliases = _sender_aliases(account, jid)
         placeholders = ",".join("?" * len(aliases))
         cursor.execute(
             f"""
@@ -1044,7 +1045,7 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
             media_type=msg_data[7],
         )
 
-        return msg_to_dict(message)
+        return msg_to_dict(account, message)
 
     except sqlite3.Error as e:
         print(f"Database error: {e}")
@@ -1054,14 +1055,14 @@ def get_last_interaction(jid: str) -> dict[str, Any] | None:
             conn.close()
 
 
-def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any] | None:
+def get_chat(account: Account, chat_jid: str, include_last_message: bool = True) -> dict[str, Any] | None:
     """Get chat metadata by JID.
 
     Returns:
         Chat dictionary or None if not found
     """
     try:
-        conn = _connect_messages_db()
+        conn = _connect_messages_db(account)
         cursor = conn.cursor()
 
         # See list_chats: the last message is always joined for is_from_me,
@@ -1092,7 +1093,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
 
         chat = Chat(
             jid=chat_data[0],
-            name=_display_chat_name(chat_data[0], chat_data[1]),
+            name=_display_chat_name(account, chat_data[0], chat_data[1]),
             last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
             last_message=chat_data[3],
             last_sender=chat_data[4],
@@ -1109,10 +1110,10 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> dict[str, Any]
             conn.close()
 
 
-def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | None:
+def get_direct_chat_by_contact(account: Account, sender_phone_number: str) -> dict[str, Any] | None:
     """Get chat metadata by sender phone number."""
     try:
-        conn = _connect_messages_db()
+        conn = _connect_messages_db(account)
         cursor = conn.cursor()
 
         cursor.execute(
@@ -1140,7 +1141,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
 
         chat = Chat(
             jid=chat_data[0],
-            name=_display_chat_name(chat_data[0], chat_data[1]),
+            name=_display_chat_name(account, chat_data[0], chat_data[1]),
             last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
             last_message=chat_data[3],
             last_sender=chat_data[4],
@@ -1158,6 +1159,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> dict[str, Any] | Non
 
 
 def send_message(
+    account: Account,
     recipient: str,
     message: str,
     quoted_message_id: str = "",
@@ -1170,7 +1172,7 @@ def send_message(
         if not recipient:
             return False, "Recipient must be provided"
 
-        url = f"{WHATSAPP_API_BASE_URL}/send"
+        url = f"{account.api_url}/send"
         payload: dict[str, Any] = {
             "recipient": recipient,
             "message": message,
@@ -1182,7 +1184,7 @@ def send_message(
         if mentions:
             payload["mentions"] = mentions
 
-        response = requests.post(url, json=payload, headers=_bridge_headers())
+        response = requests.post(url, json=payload, headers=account.bridge_headers())
 
         # Check if the request was successful
         if response.status_code == 200:
@@ -1199,7 +1201,7 @@ def send_message(
         return False, f"Unexpected error: {str(e)}"
 
 
-def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool, str]:
+def send_file(account: Account, recipient: str, media_path: str, caption: str = "") -> tuple[bool, str]:
     """Send a media file (image, video, document) with an optional caption.
 
     The bridge populates the WA media-message Caption field from `message`, so
@@ -1217,12 +1219,12 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool,
         if not os.path.isfile(media_path):
             return False, f"Media file not found: {media_path}"
 
-        url = f"{WHATSAPP_API_BASE_URL}/send"
+        url = f"{account.api_url}/send"
         payload = {"recipient": recipient, "media_path": media_path}
         if caption:
             payload["message"] = caption
 
-        response = requests.post(url, json=payload, headers=_bridge_headers())
+        response = requests.post(url, json=payload, headers=account.bridge_headers())
 
         # Check if the request was successful
         if response.status_code == 200:
@@ -1239,7 +1241,7 @@ def send_file(recipient: str, media_path: str, caption: str = "") -> tuple[bool,
         return False, f"Unexpected error: {str(e)}"
 
 
-def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
+def send_audio_message(account: Account, recipient: str, media_path: str) -> tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
@@ -1260,10 +1262,10 @@ def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
                 return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
 
         try:
-            url = f"{WHATSAPP_API_BASE_URL}/send"
+            url = f"{account.api_url}/send"
             payload = {"recipient": recipient, "media_path": media_path}
 
-            response = requests.post(url, json=payload, headers=_bridge_headers())
+            response = requests.post(url, json=payload, headers=account.bridge_headers())
 
             # Check if the request was successful
             if response.status_code == 200:
@@ -1289,6 +1291,7 @@ def send_audio_message(recipient: str, media_path: str) -> tuple[bool, str]:
 
 
 def send_reaction(
+    account: Account,
     recipient: str,
     message_id: str,
     emoji: str,
@@ -1314,7 +1317,7 @@ def send_reaction(
         if not message_id:
             return False, "Message ID must be provided"
 
-        url = f"{WHATSAPP_API_BASE_URL}/react"
+        url = f"{account.api_url}/react"
         payload: dict[str, Any] = {
             "recipient": recipient,
             "message_id": message_id,
@@ -1323,7 +1326,7 @@ def send_reaction(
             "sender_jid": sender_jid,
         }
 
-        response = requests.post(url, json=payload, headers=_bridge_headers())
+        response = requests.post(url, json=payload, headers=account.bridge_headers())
 
         if response.status_code == 200:
             result = response.json()
@@ -1342,6 +1345,7 @@ def send_reaction(
 
 
 def mark_messages_read(
+    account: Account,
     message_ids: list[str],
     chat_jid: str,
     sender_jid: str = "",
@@ -1367,9 +1371,9 @@ def mark_messages_read(
             payload["timestamp"] = timestamp
 
         response = requests.post(
-            f"{WHATSAPP_API_BASE_URL}/mark-read",
+            f"{account.api_url}/mark-read",
             json=payload,
-            headers=_bridge_headers(),
+            headers=account.bridge_headers(),
         )
 
         if response.status_code == 200:
@@ -1385,7 +1389,38 @@ def mark_messages_read(
         return False, f"Unexpected error: {str(e)}"
 
 
-def download_media(message_id: str, chat_jid: str) -> str | None:
+def holds_message(account: Account, message_id: str, chat_jid: str) -> bool:
+    """Whether the account's messages.db holds this message in this chat.
+
+    The chat may be a JID or, for a person, a bare phone number; a person's chat
+    is matched in its phone and LID forms, since the bridge may store either.
+    A message between two of the user's numbers is in each store under the
+    other number's chat, so the chat tells the two sides apart.
+
+    Raises:
+        FileNotFoundError: the account's messages.db is missing.
+    """
+    if not message_id or not chat_jid:
+        return False
+    user, _, server = chat_jid.partition("@")
+    if server in ("", "s.whatsapp.net", "lid"):
+        chats = [alias for alias in _sender_aliases(account, user) if "@" in alias]
+    else:
+        chats = [chat_jid]
+    conn = _connect_messages_db(account)
+    try:
+        row = conn.execute(
+            f"SELECT 1 FROM messages WHERE id = ? AND chat_jid IN ({','.join('?' * len(chats))}) LIMIT 1",
+            (message_id, *chats),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+    return row is not None
+
+
+def download_media(account: Account, message_id: str, chat_jid: str) -> str | None:
     """Download media from a message and return the local file path.
 
     Args:
@@ -1396,10 +1431,10 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
         The local file path if download was successful, None otherwise
     """
     try:
-        url = f"{WHATSAPP_API_BASE_URL}/download"
+        url = f"{account.api_url}/download"
         payload = {"message_id": message_id, "chat_jid": chat_jid}
 
-        response = requests.post(url, json=payload, headers=_bridge_headers())
+        response = requests.post(url, json=payload, headers=account.bridge_headers())
 
         if response.status_code == 200:
             result = response.json()
@@ -1423,3 +1458,51 @@ def download_media(message_id: str, chat_jid: str) -> str | None:
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
         return None
+
+
+def own_number(account: Account) -> str | None:
+    """The account's own phone number, from the device row whatsmeow keeps after pairing."""
+    path = Path(account.whatsmeow_db_path)
+    if not path.is_file():
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        row = conn.execute("SELECT jid FROM whatsmeow_device WHERE jid IS NOT NULL AND jid != '' LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+    if not row:
+        return None
+    # Device JIDs look like "391234567890:12@s.whatsapp.net"; the user part is the number.
+    return row[0].split("@")[0].split(":")[0].split(".")[0]
+
+
+def connection_status(account: Account) -> dict[str, Any]:
+    """Ask the account's bridge how its WhatsApp connection is doing. Never raises."""
+    url = f"{account.api_url}/connection"
+    try:
+        response = requests.get(url, headers=account.bridge_headers(), timeout=5)
+    except requests.RequestException as e:
+        return {"reachable": False, "connected": False, "error": f"Bridge not reachable at {url} ({type(e).__name__})"}
+    if response.status_code != 200:
+        error = f"Bridge answered HTTP {response.status_code}"
+        if response.status_code == 401:
+            error += "; it rejected the bridge token read for this account"
+        return {"reachable": True, "connected": False, "error": error}
+    try:
+        status = response.json()
+    except ValueError:
+        status = None
+    if not isinstance(status, dict):
+        return {"reachable": True, "connected": False, "error": "Bridge answered with an unexpected connection status"}
+    # Copy only the status fields: the payload can also carry a live pairing QR code.
+    return {
+        "reachable": True,
+        "state": status.get("state"),
+        "connected": status.get("connected") is True,
+        "paired": status.get("paired"),
+        "message": status.get("message"),
+    }

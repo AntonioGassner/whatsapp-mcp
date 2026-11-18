@@ -143,6 +143,26 @@ Add to your Cursor MCP settings (`~/.cursor/mcp.json`):
 
 Messages include `sender_display` showing "Name (phone)" format for easy identification by agents.
 
+### Account Operations
+
+#### `list_accounts`
+
+List the WhatsApp accounts this server serves (see
+[Several WhatsApp numbers](#several-whatsapp-numbers-accounts-file)) and whether
+each one works. Without an accounts file there is one account, `default`.
+
+Returns one entry per account:
+
+- `name`: the account's short name.
+- `phone_number`: the account's own number, read from its `whatsapp.db`; null
+  when that store can't be read.
+- `store_available`: whether its `messages.db` exists.
+- `bridge`: `reachable`, plus the bridge's `state`, `connected`, `paired` and
+  `message` from `GET /api/connection`, or an `error` when the bridge can't be
+  asked. The pairing QR code is never returned.
+
+One unhealthy account never makes the call fail.
+
 ### Contact Operations
 
 #### `search_contacts`
@@ -152,6 +172,7 @@ Search contacts by name or phone number.
 **Parameters:**
 
 - `query` (required): Name or phone number to search
+- `account` (optional): Account name from `list_accounts`; omit to search every account. A person known on two accounts is listed once per account
 
 **Natural Language Examples:**
 
@@ -167,6 +188,7 @@ Resolve a WhatsApp contact name from a phone number, LID, or full JID.
 
 - `identifier` (required): Phone number, LID, or full JID (aliases: `phone_number`, `phone`)
   - Examples: `12025551234`, `184125298348272`, `12025551234@s.whatsapp.net`, `184125298348272@lid`
+- `account` (optional): Account name from `list_accounts`; omit to look in every account. When several accounts know the contact, the one whose chat with it was most recently active is returned and `also_in_accounts` names the others
 
 **Natural Language Examples:**
 
@@ -187,6 +209,7 @@ Get messages with filters, date ranges, and sorting.
 - `before_date` (optional): Messages before this date (YYYY-MM-DD)
 - `after_date` (optional): Messages after this date (YYYY-MM-DD)
 - `sort_by` (optional): "newest" or "oldest" (default "newest")
+- `account` (optional): Account name from `list_accounts`; omit to search every account. Matches from every account are merged into one list in the `sort_by` order, and paging applies to the merged list
 
 **Natural Language Examples:**
 
@@ -206,6 +229,7 @@ Send a text message to a contact or group, optionally as a quoted reply.
 - `quoted_sender_jid` (optional): Full JID of the author of the quoted message. Required for group replies so WhatsApp renders the correct attribution header.
 - `quoted_content` (optional): Text content of the quoted message, used for the reply preview. Only plain text is supported.
 - `mentions` (optional): List of users to @-mention, as phone numbers with country code (e.g. `["12025551234"]`) or JIDs. For each entry the message text must contain a matching `@<number>` token (e.g. `"thanks @12025551234!"`), which recipients' devices render as a highlighted, tappable mention that also notifies the user. Only meaningful in group chats.
+- `account` (required with several accounts): Account name from `list_accounts` to send from; optional with a single account. A reply goes out from the account that holds the quoted message in this chat, so it needs `account` only when several accounts hold that message or none does
 
 Inbound quoted replies are stored automatically. The `quoted_message_id` field in each message returned by `list_messages` indicates which message it is replying to (or `null` for non-replies).
 
@@ -227,6 +251,7 @@ automatically.
 - `chat_jid` (required): JID of the chat containing the messages
 - `sender_jid` (required for groups): Full JID or bare phone number of the original message sender
 - `timestamp` (optional): RFC 3339 read timestamp; defaults to the current time
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused while another account does
 
 **Natural Language Examples:**
 
@@ -244,6 +269,7 @@ Send (or remove) an emoji reaction to a message.
 - `emoji` (required): Reaction emoji (e.g. `"👍"`). Pass an empty string `""` to remove an existing reaction.
 - `from_me` (optional, default `false`): Whether the original message was sent by the current user
 - `sender_jid` (optional): Full JID of the original message sender — required for group messages when `from_me` is `false` so the correct WhatsApp key is built
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused while another account does
 
 Inbound reactions received from others are stored automatically as messages with `media_type = "reaction"`. The `reaction_to_message_id` field in each reaction message indicates which message was reacted to.
 
@@ -284,6 +310,7 @@ attachments sent by older bridge versions or prevent WhatsApp media expiry.
 - `recipient` (required): Phone number or group JID
 - `file_path` (required): Path to the file
 - `caption` (optional): Caption for the media
+- `account` (required with several accounts): Account name from `list_accounts` to send from; optional with a single account
 
 The bridge only reads files inside configured media roots. By default this is
 `~/.local/share/whatsapp-mcp/outbox`; set `WHATSAPP_MEDIA_ROOTS` to allow
@@ -300,6 +327,7 @@ Send a voice message (automatically converts to Opus .ogg format).
 
 - `recipient` (required): Phone number or group JID
 - `file_path` (required): Path to audio file
+- `account` (required with several accounts): Account name from `list_accounts` to send from; optional with a single account
 
 Converted audio is sent through the same media-path confinement as
 `send_file`.
@@ -313,6 +341,7 @@ only helps a client that can read the filesystem — use `view_media` otherwise.
 
 - `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused while another account does
 
 #### `view_media`
 
@@ -330,6 +359,7 @@ below 4 MB are returned unchanged and anything else reports what is missing.
 - `message_id` (required): ID of the message with media
 - `chat_jid` (required): JID of the chat containing the message
 - `max_dimension` (optional): longest edge in pixels, default `1024`
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused while another account does
 
 `max_dimension` must be an integer from `1` to `2048`. Invalid values are
 rejected before the server downloads or renders any media.
@@ -382,6 +412,7 @@ Cache reads and writes use both message ID and chat JID.
 - `message_id` (required): ID of the message with the voice note
 - `chat_jid` (required): JID of the chat containing the message
 - `force` (optional): transcribe again even when a transcript is stored
+- `account` (optional): Account name from `list_accounts`; omit to use the account that holds the message. Required when several accounts hold it or none does; an account that doesn't hold it is refused while another account does
 
 ### Chat Operations
 
@@ -428,6 +459,7 @@ List all chats with metadata.
 **Parameters:**
 
 - `limit` (optional): Number of chats (default 50, max 200)
+- `account` (optional): Account name from `list_accounts`; omit to list every account. Chats from every account are merged by last activity (or name), and a chat that exists in two accounts is listed once per account
 
 #### `get_chat`
 
@@ -436,6 +468,7 @@ Get specific chat metadata by JID.
 **Parameters:**
 
 - `jid` (required): Chat JID
+- `account` (optional): Account name from `list_accounts`; omit to look in every account. When several accounts have the chat, the most recently active one is returned and `also_in_accounts` names the others
 
 #### `get_direct_chat_by_contact`
 
@@ -444,6 +477,7 @@ Find a direct message chat with a contact.
 **Parameters:**
 
 - `phone` (required): Phone number of the contact
+- `account` (optional): Account name from `list_accounts`; omit to look in every account. When several accounts have the chat, the most recently active one is returned and `also_in_accounts` names the others
 
 #### `get_contact_chats`
 
@@ -452,6 +486,7 @@ List all chats involving a specific contact.
 **Parameters:**
 
 - `phone` (required): Phone number of the contact
+- `account` (optional): Account name from `list_accounts`; omit to search every account. Chats from every account are merged by last activity
 
 #### `get_last_interaction`
 
@@ -460,6 +495,7 @@ Get the last message exchanged with a contact.
 **Parameters:**
 
 - `phone` (required): Phone number of the contact
+- `account` (optional): Account name from `list_accounts`; omit to look in every account. When several accounts have messages with the contact, the newest message is returned and `also_in_accounts` names the others
 
 #### `get_message_context`
 
@@ -471,6 +507,7 @@ Get messages around a specific message for context.
 - `chat_jid` (required): JID of the chat
 - `before` (optional): Number of messages before (default 5)
 - `after` (optional): Number of messages after (default 5)
+- `account` (optional): Account name from `list_accounts`; omit to look in every account. When several accounts hold the message (a message between two of your numbers is in both stores), the one whose chat was most recently active is returned and `also_in_accounts` names the others
 
 ## Configuration
 
@@ -487,6 +524,8 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSMEOW_DB_PATH`    | `../whatsapp-bridge/store/whatsapp.db`   | whatsmeow DB used for LID ↔ phone resolution |
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
 | `WHATSAPP_BRIDGE_TOKEN` | generated next to `WHATSMEOW_DB_PATH` as `.bridge-token` | Bearer token for bridge REST calls; also signed onto outbound webhook POSTs |
+| `WHATSAPP_ACCOUNTS_FILE` | unset | JSON accounts file for serving several WhatsApp numbers from one MCP server; see [Several WhatsApp numbers](#several-whatsapp-numbers-accounts-file) |
+| `WHATSAPP_HUB_URL` | `http://localhost:8767/ui/whatsapp` | AutoHub status/pairing page opened by macOS bridge notifications |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
 | `WHATSAPP_DEVICE_NAME` | `whatsmeow` (whatsmeow default)          | Label shown for this connection under WhatsApp > Linked Devices. Set to a recognisable name. Applies at pair time only (re-pair to change) |
 | `WHATSAPP_MCP_TRANSPORT` | `stdio`                                | MCP transport to serve clients: `stdio`, `http`, or `sse` |
@@ -555,6 +594,25 @@ Outbound `media_path` values are confined to `WHATSAPP_MEDIA_ROOTS`. The default
 outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
 files there before calling `send_file` or `send_audio_message`, or set
 `WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
+
+### Connection status and phone linking
+
+The authenticated bridge API remains available before linking:
+
+- `GET /api/connection` returns `state`, `connected`, `paired`, `message`,
+  `qrCode`, `qrExpiresAt`, `updatedAt`, and `lastError` (`code`/`message` or null).
+  States are `connected`, `pairing`, `logged_out`, `disconnected`, `outdated`,
+  `connecting`, and `error`. QR values expire and refresh automatically; responses
+  use `Cache-Control: no-store`. Treat the QR as a short-lived pairing secret.
+- `POST /api/connection/reconnect` retries the saved session or requests a new
+  pairing QR if unpaired. Repeated requests share one connection attempt. It
+  never deletes the databases or logs QR data when running in the background.
+- `GET /api/health` keeps its 200/503 readiness behavior and includes the current
+  `state`, `paired`, `message`, and `lastError`, without QR data.
+
+AutoHub displays this status and QR at `/ui/whatsapp`. From your phone, use
+WhatsApp **Linked Devices → Link a Device**. A healthy existing session reconnects
+without scanning a new QR.
 
 ### Where runtime data is stored
 
@@ -682,17 +740,99 @@ when the machine or a backup is lost.
    client can read known history. An unexpected QR pairing prompt or empty
    history is a reason to stop and recheck paths before proceeding.
 
-**Installer caveat:** rerunning `scripts/install-launchd-macos.sh` rewrites
-`launchd.env` and both plists, restores the checkout's bridge directory, and
-starts the jobs immediately. It does not preserve this custom runtime location.
-After a reinstall, stop both jobs again and reapply the directory and token
-settings above before restarting them. Review any newly created checkout store;
-do not replace the relocated store with it.
+**Reinstalling:** the installer preserves existing runtime/store paths and saved
+settings from `launchd.env`; explicitly exported values override saved settings.
+It builds from the current checkout into the saved binary path. Existing session
+and message databases are left in place.
 
 **Fresh manual installation:** only when there is no session or history to
 preserve, omit the `mv` step, create the runtime directory, and launch the built
 binary there. Pair the new device, then point the MCP server at the new databases
 and token as above. This is separate from migrating an existing installation.
+
+### Several WhatsApp numbers (accounts file)
+
+One bridge serves one WhatsApp number. To use several numbers (for example a
+personal number and a WhatsApp Business number), run one bridge per number and
+point a single MCP server at all of them with an accounts file.
+
+1. Give each bridge its own working directory, so each gets its own `store/`,
+   and its own port. For example, from two copies of the built binary:
+
+   ```bash
+   cd ~/wa/personal && WHATSAPP_BRIDGE_PORT=8081 ./whatsapp-bridge
+   cd ~/wa/work     && WHATSAPP_BRIDGE_PORT=8082 ./whatsapp-bridge
+   ```
+
+   Pair each one with its own phone (WhatsApp → Linked Devices).
+
+2. List the accounts in a JSON file:
+
+   ```json
+   [
+     {"name": "personal", "store_dir": "~/wa/personal/store", "api_url": "http://localhost:8081/api"},
+     {"name": "work", "store_dir": "~/wa/work/store", "api_url": "http://localhost:8082/api"}
+   ]
+   ```
+
+   - `name`: a short name of lowercase letters, digits and hyphens, unique in
+     the file.
+   - `store_dir`: the bridge's store folder, holding `messages.db`,
+     `whatsapp.db` and `.bridge-token`. A relative path is relative to the
+     accounts file.
+   - `api_url`: the bridge's REST base URL.
+
+   Tokens never go in this file: each account's bridge token is read from
+   `.bridge-token` in its own `store_dir`.
+
+3. Set `WHATSAPP_ACCOUNTS_FILE` to the file's path in the MCP server's
+   environment and restart it. The file is read at startup; any problem (an
+   unreadable file, invalid JSON, an empty list, a duplicate or invalid name, a
+   missing field, an unknown field, two entries sharing a `store_dir` or an
+   `api_url`) stops the server with a message naming the entry and the problem.
+
+With an accounts file, `WHATSAPP_DB_PATH`, `WHATSMEOW_DB_PATH`,
+`WHATSAPP_API_URL` and `WHATSAPP_BRIDGE_TOKEN` are not used. Without one, the
+server serves a single account named `default` built from those settings,
+exactly as before.
+
+Use `list_accounts` to check each account's number and bridge.
+
+`list_messages`, `list_chats`, `search_contacts` and `get_contact_chats` read
+every account unless you pass `account`. Results from all accounts are merged
+in the tool's usual order and paged after merging, and each message, chat and
+contact carries an `account` field naming the account it came from. An account
+whose `messages.db` is missing is skipped; naming it fails with the missing
+store. An unknown account name is refused with the list of valid names.
+
+`get_chat`, `get_contact`, `get_direct_chat_by_contact`, `get_last_interaction`
+and `get_message_context` also look in every account unless you pass
+`account`, and keep their usual result. When the item is in several accounts
+(for example a message between two of your own numbers, which both stores
+hold), the match from the most recently active account is returned, tagged
+with its `account`, and `also_in_accounts` names the others.
+
+`send_message`, `send_file` and `send_audio_message` never pick an account by
+themselves: with several accounts, `account` is required, and a send without
+it fails before any bridge is contacted, listing the valid names. The send goes
+to that account's bridge with that account's token, and the result carries
+`account` and `account_phone_number`, the number it went out from.
+
+Actions on an existing message (a quoted reply with `send_message`,
+`send_reaction`, `mark_messages_read`, `download_media`, `view_media` and
+`transcribe_audio`) use the account whose store holds that message in the given
+chat, so you don't name it. A direct message between two of your numbers is in
+each store under the other number's chat, so the chat tells the two sides
+apart. When several accounts hold the message (one in a group two of your
+numbers are in), `account` is required and the error names those accounts; when
+none does, `account` is required and the error lists the valid names. Naming an
+account is refused when another account holds the message and the named one
+doesn't, and `mark_messages_read` refuses messages held by different accounts:
+mark each account's messages in a separate call. Nothing reaches a bridge
+until the account is settled, and the call goes to that account's bridge with
+that account's token. Reactions, receipts and replies report `account` and
+`account_phone_number`; media and transcript results report `account`. A
+transcript is stored in, and later served from, that account's store only.
 
 ### Run automatically on macOS
 
@@ -715,7 +855,7 @@ It safely reloads only these labels:
 - `com.whatsapp-mcp.bridge-monitor`
 
 To customize the launchd environment, export values before running the installer.
-Re-run the installer after changing them.
+Re-run the installer after changing them; saved values are otherwise preserved.
 
 ```bash
 export WHATSAPP_BRIDGE_PORT=8080
@@ -734,10 +874,12 @@ tail -n 100 ~/Library/Logs/whatsapp-mcp/bridge.err.log
 tail -n 100 ~/Library/Logs/whatsapp-mcp/monitor.err.log
 ```
 
-The monitor sends a macOS notification once per failure type until recovery. It
-alerts when the bridge LaunchAgent is unloaded, the token is missing, the health
-endpoint is unreachable, WhatsApp is disconnected, or recent logs indicate that
-QR relinking is needed.
+The monitor reports the actual connection cause: an outdated client needs a
+bridge update; a logged-out or unpaired device needs phone linking; a temporary
+disconnection is retried automatically. It deduplicates repeated alerts, reminds
+you after six hours of persistent failure, and reports connection recovery.
+Notifications open `WHATSAPP_HUB_URL` when `terminal-notifier` is installed;
+the standard macOS fallback includes the same URL in its text.
 
 If `store/.bridge-token` lives inside a macOS TCC-protected location (for example
 `~/Documents` or `~/Desktop`), the sandboxed monitor can be denied read access to

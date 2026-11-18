@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+from tests.conftest import first_account
 from whatsapp import Chat, Contact, Message, chat_to_dict, contact_to_dict, msg_to_dict
 
 
@@ -21,7 +22,7 @@ class TestMessageConversion:
             media_type=None,
         )
 
-        result = msg_to_dict(msg, include_sender_name=False)
+        result = msg_to_dict(first_account(), msg, include_sender_name=False)
 
         assert result["id"] == "msg123"
         assert result["timestamp"] == "2024-01-15T10:30:00"
@@ -46,7 +47,7 @@ class TestMessageConversion:
             chat_jid="1234567890@s.whatsapp.net",
         )
 
-        result = msg_to_dict(msg, include_sender_name=True)
+        result = msg_to_dict(first_account(), msg, include_sender_name=True)
 
         assert result["sender_name"] == "Me"
         assert result["sender_display"] == "Me"
@@ -63,7 +64,7 @@ class TestMessageConversion:
             media_type="image",
         )
 
-        result = msg_to_dict(msg, include_sender_name=False)
+        result = msg_to_dict(first_account(), msg, include_sender_name=False)
 
         assert result["media_type"] == "image"
         assert result["reaction_to_message_id"] is None
@@ -81,7 +82,7 @@ class TestMessageConversion:
             filename="3AABCDEF01234567",  # reacted-to message ID stored in filename
         )
 
-        result = msg_to_dict(msg, include_sender_name=False)
+        result = msg_to_dict(first_account(), msg, include_sender_name=False)
 
         assert result["reaction_to_message_id"] == "3AABCDEF01234567"
         assert result["quoted_message_id"] is None
@@ -100,7 +101,7 @@ class TestMessageConversion:
             filename="photo.jpg",
         )
 
-        result = msg_to_dict(msg, include_sender_name=False)
+        result = msg_to_dict(first_account(), msg, include_sender_name=False)
 
         assert result["reaction_to_message_id"] is None
 
@@ -116,7 +117,7 @@ class TestMessageConversion:
             quoted_message_id="3AORIGINAL0000001",
         )
 
-        result = msg_to_dict(msg, include_sender_name=False)
+        result = msg_to_dict(first_account(), msg, include_sender_name=False)
 
         assert result["quoted_message_id"] == "3AORIGINAL0000001"
         assert result["reaction_to_message_id"] is None
@@ -132,7 +133,7 @@ class TestMessageConversion:
             chat_jid="1234567890@s.whatsapp.net",
         )
 
-        result = msg_to_dict(msg, include_sender_name=False)
+        result = msg_to_dict(first_account(), msg, include_sender_name=False)
 
         assert result["quoted_message_id"] is None
         assert result["reaction_to_message_id"] is None
@@ -151,7 +152,7 @@ class TestMessageConversion:
             quoted_message_id="3AORIGINAL0000001",
         )
 
-        result = msg_to_dict(msg, include_sender_name=False)
+        result = msg_to_dict(first_account(), msg, include_sender_name=False)
 
         assert result["reaction_to_message_id"] == "3AREACTED0000001"
         assert result["quoted_message_id"] == "3AORIGINAL0000001"

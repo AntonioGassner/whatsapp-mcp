@@ -9,6 +9,7 @@ import sqlite3
 import pytest
 
 import whatsapp
+from tests.conftest import first_account, use_default_account
 
 LONG_JID = "15551234567@s.whatsapp.net"
 
@@ -33,33 +34,35 @@ def lookup_db(tmp_path, monkeypatch):
     )
     conn.commit()
     conn.close()
-    monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(db_path))
-    monkeypatch.setattr(whatsapp, "_resolve_name_from_whatsmeow", lambda jid: None)
+    # No whatsmeow contact store: names can only come from messages.db.
+    use_default_account(
+        monkeypatch, WHATSAPP_DB_PATH=str(db_path), WHATSMEOW_DB_PATH=tmp_path / "no-contacts" / "whatsapp.db"
+    )
     return db_path
 
 
 def test_direct_chat_lookup_rejects_substring_match(lookup_db):
     # "5551234" is a substring of the stored JID but not the same contact.
-    assert whatsapp.get_direct_chat_by_contact("5551234") is None
+    assert whatsapp.get_direct_chat_by_contact(first_account(), "5551234") is None
 
 
 def test_direct_chat_lookup_matches_exact_user_part(lookup_db):
-    chat = whatsapp.get_direct_chat_by_contact("15551234567")
+    chat = whatsapp.get_direct_chat_by_contact(first_account(), "15551234567")
     assert chat is not None
     assert chat["jid"] == LONG_JID
 
 
 def test_direct_chat_lookup_accepts_full_jid(lookup_db):
-    chat = whatsapp.get_direct_chat_by_contact(LONG_JID)
+    chat = whatsapp.get_direct_chat_by_contact(first_account(), LONG_JID)
     assert chat is not None
     assert chat["jid"] == LONG_JID
 
 
 def test_direct_chat_lookup_treats_like_wildcards_literally(lookup_db):
-    assert whatsapp.get_direct_chat_by_contact("%") is None
-    assert whatsapp.get_direct_chat_by_contact("_5551234567") is None
+    assert whatsapp.get_direct_chat_by_contact(first_account(), "%") is None
+    assert whatsapp.get_direct_chat_by_contact(first_account(), "_5551234567") is None
 
 
 def test_sender_name_fallback_does_not_borrow_other_contacts_name(lookup_db):
-    name = whatsapp.get_sender_name("5551234@s.whatsapp.net")
+    name = whatsapp.get_sender_name(first_account(), "5551234@s.whatsapp.net")
     assert name != "Long Number"

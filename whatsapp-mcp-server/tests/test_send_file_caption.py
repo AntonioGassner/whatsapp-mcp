@@ -1,4 +1,5 @@
 import whatsapp
+from tests.conftest import first_account
 
 
 class DummyResponse:
@@ -28,7 +29,7 @@ def test_send_file_with_caption_sends_one_request(monkeypatch, tmp_path):
     monkeypatch.setenv("WHATSAPP_BRIDGE_TOKEN", "test-token")
     _capture_post(monkeypatch, calls)
 
-    success, _ = whatsapp.send_file("12025551234@s.whatsapp.net", str(media), "Q3 numbers")
+    success, _ = whatsapp.send_file(first_account(), "12025551234@s.whatsapp.net", str(media), "Q3 numbers")
 
     assert success is True
     assert len(calls) == 1
@@ -47,7 +48,7 @@ def test_send_file_without_caption_omits_message_field(monkeypatch, tmp_path):
     media.write_bytes(b"\xff\xd8\xff")
     _capture_post(monkeypatch, calls)
 
-    success, _ = whatsapp.send_file("12025551234@s.whatsapp.net", str(media))
+    success, _ = whatsapp.send_file(first_account(), "12025551234@s.whatsapp.net", str(media))
 
     assert success is True
     assert "message" not in calls[0]["json"]
@@ -59,7 +60,7 @@ def test_send_file_empty_caption_omits_message_field(monkeypatch, tmp_path):
     media.write_bytes(b"\xff\xd8\xff")
     _capture_post(monkeypatch, calls)
 
-    whatsapp.send_file("12025551234@s.whatsapp.net", str(media), "")
+    whatsapp.send_file(first_account(), "12025551234@s.whatsapp.net", str(media), "")
 
     assert "message" not in calls[0]["json"]
 
@@ -68,7 +69,9 @@ def test_send_file_missing_file_does_not_call_bridge(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(whatsapp.requests, "post", lambda *a, **kw: calls.append(1))
 
-    success, message = whatsapp.send_file("12025551234@s.whatsapp.net", str(tmp_path / "absent.pdf"), "hi")
+    success, message = whatsapp.send_file(
+        first_account(), "12025551234@s.whatsapp.net", str(tmp_path / "absent.pdf"), "hi"
+    )
 
     assert success is False
     assert "not found" in message

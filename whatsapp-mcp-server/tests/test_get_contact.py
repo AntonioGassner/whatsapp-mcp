@@ -2,12 +2,12 @@ import main as mcp_main
 
 
 def test_get_contact_normalizes_phone_number(monkeypatch):
-    def fake_get_chat(jid: str, include_last_message: bool = True):
+    def fake_get_chat(account, jid: str, include_last_message: bool = True):
         assert include_last_message is False
         return {"jid": jid, "name": "John Doe"}
 
     monkeypatch.setattr(mcp_main, "whatsapp_get_chat", fake_get_chat)
-    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
+    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda account, jid: jid)
 
     result = mcp_main.get_contact(identifier="12025551234")
 
@@ -21,14 +21,14 @@ def test_get_contact_normalizes_phone_number(monkeypatch):
 
 
 def test_get_contact_normalizes_lid(monkeypatch):
-    def fake_get_chat(jid: str, include_last_message: bool = True):
+    def fake_get_chat(account, jid: str, include_last_message: bool = True):
         assert include_last_message is False
         if jid.endswith("@s.whatsapp.net"):
             return None
         return {"jid": jid, "name": "Vicky"}
 
     monkeypatch.setattr(mcp_main, "whatsapp_get_chat", fake_get_chat)
-    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
+    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda account, jid: jid)
 
     result = mcp_main.get_contact(identifier="184125298348272")
 
@@ -44,7 +44,7 @@ def test_get_contact_normalizes_lid(monkeypatch):
 def test_get_contact_falls_back_to_lid_for_14_digit_numeric_identifier(monkeypatch):
     calls = []
 
-    def fake_get_chat(jid: str, include_last_message: bool = True):
+    def fake_get_chat(account, jid: str, include_last_message: bool = True):
         assert include_last_message is False
         calls.append(jid)
         if jid.endswith("@lid"):
@@ -52,7 +52,7 @@ def test_get_contact_falls_back_to_lid_for_14_digit_numeric_identifier(monkeypat
         return None
 
     monkeypatch.setattr(mcp_main, "whatsapp_get_chat", fake_get_chat)
-    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
+    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda account, jid: jid)
 
     result = mcp_main.get_contact(identifier="35047067385985")
 
@@ -68,7 +68,7 @@ def test_get_contact_falls_back_to_lid_for_14_digit_numeric_identifier(monkeypat
 
 def test_get_contact_unresolved_falls_back_to_jid_user(monkeypatch):
     monkeypatch.setattr(mcp_main, "whatsapp_get_chat", lambda *args, **kwargs: None)
-    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
+    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda account, jid: jid)
 
     result = mcp_main.get_contact(identifier="184125298348272@lid")
 
@@ -80,7 +80,7 @@ def test_get_contact_unresolved_falls_back_to_jid_user(monkeypatch):
 
 def test_get_contact_backward_compatible_phone_number_param(monkeypatch):
     monkeypatch.setattr(mcp_main, "whatsapp_get_chat", lambda *args, **kwargs: {"name": "John Doe"})
-    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda jid: jid)
+    monkeypatch.setattr(mcp_main, "whatsapp_get_sender_name", lambda account, jid: jid)
 
     result = mcp_main.get_contact(phone_number="12025551234")
 
