@@ -40,9 +40,8 @@ function Assert-Contains([string]$Haystack, [string]$Needle, [string]$What) {
 Import-Module ScheduledTasks, NetTCPIP
 
 $global:FakeCalls = [System.Collections.Generic.List[string]]::new()
-# Registered tasks by name; FakeRegistered is the last one registered.
+# Registered tasks by name.
 $global:FakeTasks = [ordered]@{}
-$global:FakeRegistered = $null
 $global:FakeCgoEnabled = '1'
 $global:FakeListener = $null
 $global:FakeBridgeExe = $null
@@ -71,8 +70,7 @@ function global:Register-ScheduledTask {
     [CmdletBinding()]
     param([string]$TaskName, [string]$TaskPath, $Action, $Trigger, $Settings, $Principal, [string]$Description, [switch]$Force)
     $global:FakeCalls.Add("Register-ScheduledTask $TaskPath$TaskName")
-    $global:FakeRegistered = [pscustomobject]$PSBoundParameters
-    $global:FakeTasks[$TaskName] = $global:FakeRegistered
+    $global:FakeTasks[$TaskName] = [pscustomobject]$PSBoundParameters
 }
 
 function global:Unregister-ScheduledTask {
@@ -80,7 +78,6 @@ function global:Unregister-ScheduledTask {
     param([string]$TaskName, [string]$TaskPath, [switch]$Confirm)
     $global:FakeCalls.Add("Unregister-ScheduledTask $TaskPath$TaskName")
     $global:FakeTasks.Remove($TaskName)
-    if ($global:FakeRegistered.TaskName -eq $TaskName) { $global:FakeRegistered = $null }
 }
 
 function global:Start-ScheduledTask {
@@ -149,7 +146,6 @@ function New-Fixture {
     Copy-Item -Path "$RepoRoot\scripts\*-task-windows.ps1" -Destination "$root\repo\scripts\"
     $global:FakeCalls.Clear()
     $global:FakeTasks.Clear()
-    $global:FakeRegistered = $null
     $global:FakeCgoEnabled = '1'
     $global:FakeListener = $null
     $script:Fixtures.Add($root)
@@ -269,7 +265,7 @@ function Test-InstallRegistersLogonTask {
     Assert-Equal '8080' $config.Environment.WHATSAPP_BRIDGE_PORT 'WHATSAPP_BRIDGE_PORT'
     Assert-Equal $null $config.Environment.WHATSAPP_BRIDGE_TOKEN 'WHATSAPP_BRIDGE_TOKEN without an explicit token'
 
-    $task = $global:FakeRegistered
+    $task = $global:FakeTasks[$TaskName]
     if (-not $task) { Fail 'expected the task to be registered'; return }
     Assert-Equal $TaskName $task.TaskName 'task name'
     Assert-Equal $launcher $task.Action.Execute 'action executable'
@@ -370,7 +366,7 @@ function Test-InstallUsesExistingBinaryWithoutCgo {
     $result = Invoke-TaskScript $root 'install-task-windows.ps1'
     Assert-Equal 0 $result.ExitCode "installer exit code ($($result.Output))"
     if ($global:FakeCalls -match '^go build') { Fail 'expected no go build without cgo' }
-    if (-not $global:FakeRegistered) { Fail 'expected the task to be registered' }
+    if (-not $global:FakeTasks[$TaskName]) { Fail 'expected the task to be registered' }
 }
 
 function Test-InstallFailsWithoutCgoOrBinary {
@@ -379,7 +375,7 @@ function Test-InstallFailsWithoutCgoOrBinary {
     $result = Invoke-TaskScript $root 'install-task-windows.ps1'
     Assert-Equal 1 $result.ExitCode 'installer exit code'
     Assert-Contains $result.Output 'no bridge binary exists' 'installer output'
-    if ($global:FakeRegistered) { Fail 'expected no task to be registered' }
+    if ($global:FakeTasks.Count) { Fail 'expected no task to be registered' }
 }
 
 function Test-InstallRefusesBusyPort {
@@ -389,7 +385,7 @@ function Test-InstallRefusesBusyPort {
     Assert-Equal 1 $result.ExitCode 'installer exit code'
     Assert-Contains $result.Output 'Port 8080 is already in use' 'installer output'
     Assert-Contains $result.Output "pid $PID" 'installer output'
-    if ($global:FakeRegistered) { Fail 'expected no task to be registered' }
+    if ($global:FakeTasks.Count) { Fail 'expected no task to be registered' }
 }
 
 function Test-RunnerRestartsBridgeAndAppendsLogs {
@@ -448,7 +444,7 @@ function Test-UninstallRemovesGeneratedFilesOnly {
 
     $result = Invoke-TaskScript $root 'uninstall-task-windows.ps1'
     Assert-Equal 0 $result.ExitCode "uninstaller exit code ($($result.Output))"
-    if ($global:FakeRegistered) { Fail 'expected the task to be unregistered' }
+    if ($global:FakeTasks.Count) { Fail 'expected the task to be unregistered' }
     Assert-Contains ($global:FakeCalls -join "`n") "Unregister-ScheduledTask \$TaskName" 'commands'
     Assert-NotExists "$app\whatsapp-bridge-launcher.exe"
     Assert-NotExists "$app\run-whatsapp-bridge.ps1"
@@ -543,25 +539,9 @@ function Test-InstallRefusesUnusableAccountsFile {
         @{ Entries = @($personal, @{ name = 'work'; store_dir = 'work\store'; api_url = 'http://localhost/api' })
             Expected = "entry 2 ('work') has api_url 'http://localhost/api' without an explicit port" },
         @{ Entries = @($personal, @{ name = 'work'; store_dir = 'work\store'; api_url = 'http://127.0.0.1:8081/api' })
-            Expected = "entry 2 ('work') uses port 8081, like entry 1" }
-    )
-    foreach ($case in $cases) {
-        $root = New-Fixture
-        $accountsFile = "$root\accounts\accounts.json"
-        if ($case.Entries) { New-AccountsFile $root $case.Entries | Out-Null }
-        elseif ($case.Json) { New-AccountsFile $root @() | Out-Null; [System.IO.File]::WriteAllText($accountsFile, $case.Json) }
-        $result = Invoke-TaskScript $root 'install-task-windows.ps1' @{ WHATSAPP_ACCOUNTS_FILE = $accountsFile }
-        Assert-Equal 1 $result.ExitCode "installer exit code for '$($case.Expected)'"
-        Assert-Contains $result.Output $case.Expected 'installer output'
-        if ($global:FakeCalls -match '^(Stop|Register|Start)-ScheduledTask') { Fail "expected no task to be touched for '$($case.Expected)'" }
-    }
-}
-
-# A file the MCP server refuses at startup (accounts.py) is invalid here too:
-# two bridges on one store would run the same WhatsApp session.
-function Test-InstallRefusesAccountsFileTheServerRefuses {
-    $personal = @{ name = 'personal'; store_dir = 'personal\store'; api_url = 'http://localhost:8081/api' }
-    $cases = @(
+            Expected = "entry 2 ('work') uses port 8081, like entry 1" },
+        # The MCP server refuses these at startup (accounts.py): two bridges on
+        # one store would run the same WhatsApp session.
         @{ Entries = @($personal, @{ name = 'work'; store_dir = 'PERSONAL/store/'; api_url = 'http://localhost:8082/api' })
             Expected = "entry 2 ('work') repeats the store_dir" },
         @{ Entries = @($personal, @{ name = 'work'; store_dir = 'work\store'; api_url = 'http://localhost:8082/api'; phone = '+39' })
@@ -569,7 +549,9 @@ function Test-InstallRefusesAccountsFileTheServerRefuses {
     )
     foreach ($case in $cases) {
         $root = New-Fixture
-        $accountsFile = New-AccountsFile $root $case.Entries
+        $accountsFile = "$root\accounts\accounts.json"
+        if ($case.Entries) { New-AccountsFile $root $case.Entries | Out-Null }
+        elseif ($case.Json) { New-AccountsFile $root @() | Out-Null; [System.IO.File]::WriteAllText($accountsFile, $case.Json) }
         $result = Invoke-TaskScript $root 'install-task-windows.ps1' @{ WHATSAPP_ACCOUNTS_FILE = $accountsFile }
         Assert-Equal 1 $result.ExitCode "installer exit code for '$($case.Expected)'"
         Assert-Contains $result.Output $case.Expected 'installer output'
@@ -738,7 +720,6 @@ foreach ($test in @(
     'Test-InstallPrefersAccountsFileParameter',
     'Test-AccountTaskRunsGivenBinaryInStoreParent',
     'Test-InstallRefusesUnusableAccountsFile',
-    'Test-InstallRefusesAccountsFileTheServerRefuses',
     'Test-ReinstallAccountsKeepsSavedSettings',
     'Test-InstallRefusesBusyAccountPort',
     'Test-UninstallRemovesEveryBridgeTask',
