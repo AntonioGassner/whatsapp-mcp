@@ -393,7 +393,10 @@ while ($true) {
         New-Item -ItemType Directory -Force -Path $config.LogDir | Out-Null
         $out = Open-Log 'bridge.out.log'
         $err = Open-Log 'bridge.err.log'
-        $info = [System.Diagnostics.ProcessStartInfo]::new($config.BridgeBinary)
+        # The bridge has no terminal to draw a QR code in, so a bridge that
+        # needs pairing opens it in the browser instead. --full-history-pair is
+        # never passed: a restart must not ask the phone for a full resync.
+        $info = [System.Diagnostics.ProcessStartInfo]::new($config.BridgeBinary, '--qr-browser')
         $info.WorkingDirectory = $config.BridgeDir
         $info.UseShellExecute = $false
         $info.CreateNoWindow = $true

@@ -114,7 +114,7 @@ using System.Text;
 using System.Threading;
 
 class FakeBridge {
-    static int Main() {
+    static int Main(string[] args) {
         // Writes UTF-8 like the Go bridge, not the console code page, so
         // non-ASCII paths in the output match.
         Console.SetOut(new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true });
@@ -122,6 +122,7 @@ class FakeBridge {
         Console.Out.WriteLine("fake bridge stdout");
         Console.Out.WriteLine("cwd=" + Environment.CurrentDirectory);
         Console.Out.WriteLine("port=" + Environment.GetEnvironmentVariable("WHATSAPP_BRIDGE_PORT"));
+        Console.Out.WriteLine("args=" + string.Join(" ", args));
         Console.Error.WriteLine("fake bridge stderr");
         int sleepMs;
         if (int.TryParse(Environment.GetEnvironmentVariable("FAKE_BRIDGE_SLEEP_MS"), out sleepMs)) {
@@ -229,6 +230,14 @@ function Read-Log([string]$Path) {
     } finally {
         $stream.Dispose()
     }
+}
+
+# The arguments the runner gave the bridge, as the fake bridge printed them.
+# Exactly --qr-browser: a bridge that needs pairing opens its QR code in the
+# browser, and a restart never asks the phone for a full resync
+# (--full-history-pair).
+function Assert-BridgeArguments([string]$Out, [string]$What) {
+    Assert-Equal '--qr-browser' ([regex]::Match($Out, 'args=([^\r\n]*)').Groups[1].Value) "$What bridge arguments"
 }
 
 function Get-MatchCount([string]$Path, [string]$Pattern) {
@@ -408,6 +417,7 @@ function Test-RunnerRestartsBridgeAndAppendsLogs {
     $out = Read-Log "$logs\bridge.out.log"
     Assert-Contains $out "cwd=$root\repo\whatsapp-bridge" 'bridge.out.log'
     Assert-Contains $out 'port=8080' 'bridge.out.log'
+    Assert-BridgeArguments $out 'single-bridge'
 }
 
 function Test-RunnerSurvivesLogFolderRemoval {
@@ -669,6 +679,7 @@ function Test-AccountTaskRunsGivenBinaryInStoreParent {
     $out = Read-Log "$logs\bridge.out.log"
     Assert-Contains $out "cwd=$root\wa\work" 'bridge.out.log'
     Assert-Contains $out 'port=8082' 'bridge.out.log'
+    Assert-BridgeArguments $out 'work account'
 }
 
 # Task Scheduler ends only the launcher when the task is stopped; its job

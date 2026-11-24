@@ -915,12 +915,13 @@ the Go bridge at login and starts it again whenever it exits, for example after
 a crash. The installer does not need administrator rights, stores no password,
 and does not install or start the MCP server.
 
-Pair the bridge before installing: run it once in a terminal and scan the QR
-code. The task runs the bridge without a terminal, so it never prints a QR
-code. To link the phone again later, use the
-[connection API](#connection-status-and-phone-linking), or stop the task and
-run the bridge in a terminal. Stop any bridge you started by hand, then run
-from the repository root:
+The task runs the bridge without a terminal, so it starts the bridge with
+`--qr-browser`: when the bridge needs to link a phone, it opens the QR code in
+your default browser (see
+[Link or re-link a phone on Windows](#link-or-re-link-a-phone-on-windows)). It
+never passes `--full-history-pair`, so a restart never asks the phone for a
+full resync. Stop any bridge you started by hand, then run from the repository
+root:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-task-windows.ps1
@@ -993,6 +994,33 @@ Uninstall stops the task and the bridge it runs, and preserves
 and `.bridge-token`. Logs are left in `%LOCALAPPDATA%\whatsapp-mcp\logs\` for
 manual cleanup.
 
+#### Link or re-link a phone on Windows
+
+A bridge started by the task links a phone the same way in both modes. When it
+starts without a linked phone (never paired, or unlinked from the phone), it
+writes the QR code to `store\pairing-qr.html` in its working directory and opens
+that page in your default browser. On your phone, open WhatsApp → Settings →
+Linked devices → Link a device and scan the code. The page shows each new code
+as WhatsApp rotates it, and says "Phone linked" once you are done.
+
+The codes stop after a few minutes. The bridge then keeps running without a
+phone, and the page says "QR code expired" and keeps reloading. A bridge whose
+phone unlinked it (`list_accounts` or `GET /api/connection` reports
+`logged_out`) also waits without showing a code. To get a new code, restart
+only that bridge's task, here the `work` account's (without an accounts file
+the task is `whatsapp-mcp-bridge`). The other accounts keep running, and the
+new code shows in the same tab if it is still open:
+
+```powershell
+Stop-ScheduledTask -TaskName whatsapp-mcp-bridge-work
+Start-ScheduledTask -TaskName whatsapp-mcp-bridge-work
+```
+
+Alternatively, ask the
+running bridge for a new code with `POST /api/connection/reconnect` (see
+[Connection status and phone linking](#connection-status-and-phone-linking)),
+using the token in that account's `store\.bridge-token`.
+
 #### Several accounts on Windows
 
 With an [accounts file](#several-whatsapp-numbers-accounts-file), the installer
@@ -1008,7 +1036,10 @@ For each account, the task runs the bridge with the parent of its `store_dir`
 as working directory (a relative `store_dir` is relative to the accounts file)
 and with `WHATSAPP_BRIDGE_PORT` set to the port of its `api_url`. Each account
 gets its own launcher, runner, config and logs in
-`%LOCALAPPDATA%\whatsapp-mcp\<name>\`. Pair every account before installing.
+`%LOCALAPPDATA%\whatsapp-mcp\<name>\`. An account that is not linked yet opens
+its QR code in the browser when its task starts (see
+[Link or re-link a phone on Windows](#link-or-re-link-a-phone-on-windows)); the
+page's title names the account's folder.
 
 The installer checks the whole file before it touches any task, and stops with
 a message naming the entry and the problem when the file is missing or not a
