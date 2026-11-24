@@ -93,11 +93,16 @@ function Read-AccountsFile([string]$Path) {
     $baseDir = Split-Path -Parent $Path
     $names = @{}
     $ports = @{}
+    $stores = @{}
     for ($i = 1; $i -le $entries.Count; $i++) {
         $entry = $entries[$i - 1]
         $label = "Accounts file ${Path}: entry $i"
         if ($entry -isnot [System.Management.Automation.PSCustomObject]) { Fail "$label must be a JSON object with name, store_dir, api_url" }
         if ($entry.name -is [string] -and $entry.name) { $label += " ('$($entry.name)')" }
+        # The MCP server refuses these too, so no bridge is started for a file
+        # it cannot use.
+        $unknown = @($entry.PSObject.Properties.Name | Where-Object { $_ -cnotin 'name', 'store_dir', 'api_url' } | Sort-Object)
+        if ($unknown.Count -gt 0) { Fail "$label has unknown field(s) $($unknown -join ', '); allowed fields are name, store_dir, api_url" }
         foreach ($field in 'name', 'store_dir', 'api_url') {
             if ($entry.$field -isnot [string] -or -not $entry.$field.Trim()) { Fail "$label is missing $field (a non-empty string)" }
         }
@@ -121,6 +126,10 @@ function Read-AccountsFile([string]$Path) {
         if ((Split-Path -Leaf $storeDir) -ne 'store') {
             Fail "$label has store_dir '$($entry.store_dir)', whose last folder is not 'store'; the bridge keeps its data in a folder named store"
         }
+        # Two bridges on one store would run the same WhatsApp session. The
+        # hashtable compares keys case-insensitively, like Windows paths.
+        if ($stores.ContainsKey($storeDir)) { Fail "$label repeats the store_dir '$storeDir' of entry $($stores[$storeDir])" }
+        $stores[$storeDir] = $i
         [pscustomobject]@{ Name = $name; WorkDir = (Split-Path -Parent $storeDir); Port = [string]$port }
     }
 }

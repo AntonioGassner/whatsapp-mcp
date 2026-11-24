@@ -1015,7 +1015,8 @@ a message naming the entry and the problem when the file is missing or not a
 JSON list, a `store_dir` does not end in a folder named `store` (the bridge
 keeps its data in `store\` under its working directory), an `api_url` has no
 explicit port (write `http://localhost:8081/api`, not `http://localhost/api`),
-or two accounts share a port.
+two accounts share a port or a `store_dir`, or an entry has a field other than
+`name`, `store_dir` and `api_url`.
 
 All accounts run the same bridge executable: by default the one built in the
 checkout as above, or the one you pass with `-Binary <path>`. The other

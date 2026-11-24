@@ -557,6 +557,26 @@ function Test-InstallRefusesUnusableAccountsFile {
     }
 }
 
+# A file the MCP server refuses at startup (accounts.py) is invalid here too:
+# two bridges on one store would run the same WhatsApp session.
+function Test-InstallRefusesAccountsFileTheServerRefuses {
+    $personal = @{ name = 'personal'; store_dir = 'personal\store'; api_url = 'http://localhost:8081/api' }
+    $cases = @(
+        @{ Entries = @($personal, @{ name = 'work'; store_dir = 'PERSONAL/store/'; api_url = 'http://localhost:8082/api' })
+            Expected = "entry 2 ('work') repeats the store_dir" },
+        @{ Entries = @($personal, @{ name = 'work'; store_dir = 'work\store'; api_url = 'http://localhost:8082/api'; phone = '+39' })
+            Expected = "entry 2 ('work') has unknown field(s) phone" }
+    )
+    foreach ($case in $cases) {
+        $root = New-Fixture
+        $accountsFile = New-AccountsFile $root $case.Entries
+        $result = Invoke-TaskScript $root 'install-task-windows.ps1' @{ WHATSAPP_ACCOUNTS_FILE = $accountsFile }
+        Assert-Equal 1 $result.ExitCode "installer exit code for '$($case.Expected)'"
+        Assert-Contains $result.Output $case.Expected 'installer output'
+        if ($global:FakeCalls -match '^(Stop|Register|Start)-ScheduledTask') { Fail "expected no task to be touched for '$($case.Expected)'" }
+    }
+}
+
 function Test-ReinstallAccountsKeepsSavedSettings {
     $root = New-Fixture
     $accountsFile = New-ThreeAccountsFile $root
@@ -718,6 +738,7 @@ foreach ($test in @(
     'Test-InstallPrefersAccountsFileParameter',
     'Test-AccountTaskRunsGivenBinaryInStoreParent',
     'Test-InstallRefusesUnusableAccountsFile',
+    'Test-InstallRefusesAccountsFileTheServerRefuses',
     'Test-ReinstallAccountsKeepsSavedSettings',
     'Test-InstallRefusesBusyAccountPort',
     'Test-UninstallRemovesEveryBridgeTask',
