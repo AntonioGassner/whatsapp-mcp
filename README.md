@@ -764,7 +764,9 @@ point a single MCP server at all of them with an accounts file.
    cd ~/wa/work     && WHATSAPP_BRIDGE_PORT=8082 ./whatsapp-bridge
    ```
 
-   Pair each one with its own phone (WhatsApp → Linked Devices).
+   Pair each one with its own phone (WhatsApp → Linked Devices). When pairing
+   several at once, `--qr-browser` opens one tab per bridge, titled with the
+   bridge's folder name.
 
 2. List the accounts in a JSON file:
 
@@ -903,6 +905,7 @@ message DBs, media, and `.bridge-token`. Logs are left in
 | Flag                  | Default | Description                                                                                                                                                                                                                                                       |
 | --------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--full-history-pair` | `false` | Request full history at pair time. Only takes effect on a fresh pair (no existing `whatsapp.db`); no-op for already-paired sessions. The phone ultimately decides the actual history window sent — see [Requesting full history](#requesting-full-history) below. |
+| `--qr-browser` | `false` | Also show the pairing QR code in your default web browser. The bridge writes a page to `store/pairing-qr.html` that reloads every 2 seconds, so it always shows the current code, and opens it when pairing starts. Once pairing ends the page no longer contains the code. Use it when the terminal QR is unreadable (Windows consoles, Git Bash, small windows, log output scrolling it away). |
 
 ### Requesting full history
 
@@ -1175,7 +1178,7 @@ are preserved.
   release and rebuild the bridge. WhatsApp periodically raises the minimum
   supported linked-device client version, which can make older whatsmeow builds
   fail before pairing completes.
-- **QR Code Not Displaying**: Restart the bridge. Check terminal QR code support.
+- **QR Code Not Displaying**: Restart the bridge with `--qr-browser` to show the code in your web browser instead of relying on the terminal.
 - **Phone says "check your connection" after scanning**: WhatsApp answers a scan
   with a `companion_reg_refresh` notification, whatsmeow rotates the pairing
   secret, and the bridge prints a **new** QR code marked `QR code refreshed`.
