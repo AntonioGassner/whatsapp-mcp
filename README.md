@@ -739,9 +739,10 @@ when the machine or a backup is lost.
      "$HOME/Library/LaunchAgents/com.whatsapp-mcp.bridge-monitor.plist"
    ```
 
-   **Windows Task Scheduler:** the task always runs the bridge from the
-   checkout's `whatsapp-bridge\` directory, so start a relocated bridge
-   manually instead of reinstalling the task.
+   **Windows Task Scheduler:** without an accounts file the task always runs
+   the bridge from the checkout's `whatsapp-bridge\` directory, so start a
+   relocated bridge manually, or list it in an accounts file and install a task
+   per account (see [Several accounts on Windows](#several-accounts-on-windows)).
 
    Check that the bridge reconnects with the existing session and that the MCP
    client can read known history. An unexpected QR pairing prompt or empty
@@ -927,7 +928,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-task-windows
 
 The installer builds `whatsapp-bridge\whatsapp-bridge.exe` with `go build` when
 Go and a cgo C compiler are available (see [Windows](#windows)), and otherwise
-uses the existing binary. It registers one task, `whatsapp-mcp-bridge`, writes
+uses the existing binary. Without an accounts file (see
+[Several accounts on Windows](#several-accounts-on-windows)), it registers one
+task, `whatsapp-mcp-bridge`, writes
 generated support files to `%LOCALAPPDATA%\whatsapp-mcp\`, and writes logs to
 `%LOCALAPPDATA%\whatsapp-mcp\logs\`. The task runs a generated PowerShell
 runner that starts the bridge in `whatsapp-bridge\` and starts it again 10
@@ -989,6 +992,48 @@ Uninstall stops the task and the bridge it runs, and preserves
 `whatsapp-bridge\store\`, including WhatsApp session DBs, message DBs, media,
 and `.bridge-token`. Logs are left in `%LOCALAPPDATA%\whatsapp-mcp\logs\` for
 manual cleanup.
+
+#### Several accounts on Windows
+
+With an [accounts file](#several-whatsapp-numbers-accounts-file), the installer
+registers one task per account, `whatsapp-mcp-bridge-<name>`, so every bridge
+starts at login and restarts on its own. It reads the file named by
+`-AccountsFile`, or else by `WHATSAPP_ACCOUNTS_FILE`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-task-windows.ps1 -AccountsFile "$env:USERPROFILE\wa\accounts.json"
+```
+
+For each account, the task runs the bridge with the parent of its `store_dir`
+as working directory (a relative `store_dir` is relative to the accounts file)
+and with `WHATSAPP_BRIDGE_PORT` set to the port of its `api_url`. Each account
+gets its own launcher, runner, config and logs in
+`%LOCALAPPDATA%\whatsapp-mcp\<name>\`. Pair every account before installing.
+
+The installer checks the whole file before it touches any task, and stops with
+a message naming the entry and the problem when the file is missing or not a
+JSON list, a `store_dir` does not end in a folder named `store` (the bridge
+keeps its data in `store\` under its working directory), an `api_url` has no
+explicit port (write `http://localhost:8081/api`, not `http://localhost/api`),
+or two accounts share a port.
+
+All accounts run the same bridge executable: by default the one built in the
+checkout as above, or the one you pass with `-Binary <path>`. The other
+variables listed above apply to every account and are saved per account.
+`WHATSAPP_BRIDGE_TOKEN` is never saved or passed in this mode, because the MCP
+server reads each account's token from `.bridge-token` in its `store_dir`.
+
+Re-run the installer after editing the accounts file: it replaces each listed
+account's task and keeps its saved settings. It does not remove the task of an
+account you deleted from the file; uninstall that one by name. Uninstall every
+`whatsapp-mcp-bridge` and `whatsapp-mcp-bridge-*` task, or one account's:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\uninstall-task-windows.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\uninstall-task-windows.ps1 -Name work
+```
+
+Uninstalling keeps every store folder and every log.
 
 ### CLI flags (Go bridge)
 

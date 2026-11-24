@@ -1,9 +1,24 @@
-# Installs a per-user Task Scheduler task that starts the WhatsApp bridge at
-# login and starts it again whenever it exits. Needs no administrator rights.
+# Installs per-user Task Scheduler tasks that start the WhatsApp bridge at
+# login and start it again whenever it exits. Needs no administrator rights.
+#
+# Without an accounts file it installs one task, whatsapp-mcp-bridge, for the
+# bridge in this checkout. With one (-AccountsFile, else WHATSAPP_ACCOUNTS_FILE)
+# it installs whatsapp-mcp-bridge-<name> for every account in it.
+param(
+    [string]$AccountsFile = $env:WHATSAPP_ACCOUNTS_FILE,
+    # Runs this bridge executable instead of building one from the checkout.
+    [string]$Binary
+)
 $ErrorActionPreference = 'Stop'
 
-$Task = @{ TaskName = 'whatsapp-mcp-bridge'; TaskPath = '\' }
+$TaskName = 'whatsapp-mcp-bridge'
 $RestartDelaySeconds = 10
+# Passed to every bridge. In accounts mode WHATSAPP_BRIDGE_PORT comes from each
+# api_url, and WHATSAPP_BRIDGE_TOKEN is never passed: the MCP server reads each
+# account's token from .bridge-token in its store_dir, which a bridge given the
+# variable would not use.
+$PassThroughVars = 'WEBHOOK_URL', 'WEBHOOK_ENABLED', 'WHATSAPP_AUTO_DOWNLOAD_MEDIA', 'FORWARD_SELF',
+    'WHATSAPP_MEDIA_ROOTS', 'WHATSAPP_DEVICE_NAME'
 
 function Fail([string]$Message) {
     Write-Host "Error: $Message"
@@ -19,7 +34,8 @@ function Test-CgoToolchain {
 
 # Stopping the task ends the launcher, and its job object ends the runner and
 # the bridge with it.
-function Stop-InstalledTask {
+function Stop-InstalledTask([string]$Name) {
+    $Task = @{ TaskName = $Name; TaskPath = '\' }
     if (-not (Get-ScheduledTask @Task -ErrorAction SilentlyContinue)) { return }
     Stop-ScheduledTask @Task
     for ($i = 0; $i -lt 20 -and (Get-ScheduledTask @Task).State -eq 'Running'; $i++) {
@@ -37,6 +53,78 @@ function Get-CSharpCompiler {
     Fail 'Could not find csc.exe from .NET Framework 4, which is needed to build the task launcher.'
 }
 
+# Like the macOS installer, reinstalling keeps the saved settings, and a
+# variable set in this session overrides its saved value.
+function Add-TaskEnvironment($Environment, [string]$ConfigFile, [string[]]$Names) {
+    $saved = $null
+    if (Test-Path -LiteralPath $ConfigFile -PathType Leaf) {
+        try {
+            $saved = ([System.IO.File]::ReadAllText($ConfigFile) | ConvertFrom-Json).Environment
+        } catch {
+            Fail "Could not read the saved settings in ${ConfigFile}: $($_.Exception.Message)"
+        }
+    }
+    # The bridge treats an empty value as unset, and PowerShell 7 can leave a
+    # cleared variable defined but empty, so only non-empty values are kept.
+    foreach ($name in $Names) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if (-not $value -and $saved) { $value = $saved.$name }
+        if ($value) { $Environment[$name] = [string]$value }
+    }
+}
+
+# The accounts the MCP server reads from the same file, as bridges to run:
+# each in the parent of its store_dir, on the port of its api_url. Every entry
+# is checked before anything is installed.
+function Read-AccountsFile([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { Fail "Accounts file not found: $Path" }
+    $Path = (Resolve-Path -LiteralPath $Path).ProviderPath
+    try {
+        # Wrapped in an object because PowerShell 7 unwraps a one-entry list and
+        # Windows PowerShell has no -NoEnumerate.
+        $entries = (ConvertFrom-Json -InputObject ('{"accounts":' + [System.IO.File]::ReadAllText($Path) + "`n}")).accounts
+    } catch {
+        Fail "Accounts file $Path is not valid JSON: $($_.Exception.Message)"
+    }
+    if ($entries -isnot [array]) { Fail "Accounts file $Path must hold a JSON list of accounts" }
+    if ($entries.Count -eq 0) { Fail "Accounts file $Path lists no accounts; add at least one" }
+
+    # A relative store_dir is relative to the accounts file, as in accounts.py.
+    $baseDir = Split-Path -Parent $Path
+    $names = @{}
+    $ports = @{}
+    for ($i = 1; $i -le $entries.Count; $i++) {
+        $entry = $entries[$i - 1]
+        $label = "Accounts file ${Path}: entry $i"
+        if ($entry -isnot [System.Management.Automation.PSCustomObject]) { Fail "$label must be a JSON object with name, store_dir, api_url" }
+        if ($entry.name -is [string] -and $entry.name) { $label += " ('$($entry.name)')" }
+        foreach ($field in 'name', 'store_dir', 'api_url') {
+            if ($entry.$field -isnot [string] -or -not $entry.$field.Trim()) { Fail "$label is missing $field (a non-empty string)" }
+        }
+        $name = $entry.name
+        if ($name -cnotmatch '^[a-z0-9-]+$') { Fail "$label has an invalid name; use only lowercase letters, digits and hyphens" }
+        if ($names.ContainsKey($name)) { Fail "$label repeats the name '$name' of entry $($names[$name])" }
+        $names[$name] = $i
+
+        $apiUrl = $entry.api_url.Trim()
+        if ($apiUrl -notmatch '^https?://(\[[^\]/]+\]|[^/:\[\]]+):([0-9]{1,5})(/|$)' -or [int]$Matches[2] -lt 1 -or [int]$Matches[2] -gt 65535) {
+            Fail "$label has api_url '$apiUrl' without an explicit port; its bridge is started on that port, e.g. http://localhost:8081/api"
+        }
+        $port = [int]$Matches[2]
+        if ($ports.ContainsKey($port)) { Fail "$label uses port $port, like entry $($ports[$port]); give each account its own port" }
+        $ports[$port] = $i
+
+        $storeDir = $entry.store_dir.Trim()
+        if ($storeDir -eq '~' -or $storeDir -match '^~[\\/]') { $storeDir = $HOME + $storeDir.Substring(1) }
+        $storeDir = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($baseDir, $storeDir)).TrimEnd('\')
+        # The bridge keeps its data in store\ under its working directory.
+        if ((Split-Path -Leaf $storeDir) -ne 'store') {
+            Fail "$label has store_dir '$($entry.store_dir)', whose last folder is not 'store'; the bridge keeps its data in a folder named store"
+        }
+        [pscustomobject]@{ Name = $name; WorkDir = (Split-Path -Parent $storeDir); Port = [string]$port }
+    }
+}
+
 if ($env:OS -ne 'Windows_NT') { Fail 'Task Scheduler installation is only supported on Windows.' }
 if (-not $env:LOCALAPPDATA) { Fail 'LOCALAPPDATA is not set.' }
 
@@ -48,44 +136,37 @@ $NewBinary = Join-Path $BridgeDir 'whatsapp-bridge.new.exe'
 if (-not (Test-Path -LiteralPath $BridgeDir -PathType Container)) { Fail "Could not find bridge directory: $BridgeDir" }
 
 $AppDir = Join-Path $env:LOCALAPPDATA 'whatsapp-mcp'
-$LogDir = Join-Path $AppDir 'logs'
-$ConfigFile = Join-Path $AppDir 'bridge-task.json'
-$RunnerScript = Join-Path $AppDir 'run-whatsapp-bridge.ps1'
-$Launcher = Join-Path $AppDir 'whatsapp-bridge-launcher.exe'
 $NewLauncher = Join-Path $AppDir 'whatsapp-bridge-launcher.new.exe'
 $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 
-# Like the macOS installer, reinstalling keeps the saved settings, and a
-# variable set in this session overrides its saved value.
-$saved = $null
-if (Test-Path -LiteralPath $ConfigFile -PathType Leaf) {
-    try {
-        $saved = ([System.IO.File]::ReadAllText($ConfigFile) | ConvertFrom-Json).Environment
-    } catch {
-        Fail "Could not read the saved settings in ${ConfigFile}: $($_.Exception.Message)"
+# Each bridge gets its own task and its own folder for the launcher, runner,
+# config and logs: the launcher finds the runner and the logs next to itself.
+$bridges = @(if ($AccountsFile) {
+    foreach ($account in Read-AccountsFile $AccountsFile) {
+        $dir = Join-Path $AppDir $account.Name
+        $environment = [ordered]@{ WHATSAPP_BRIDGE_PORT = $account.Port }
+        Add-TaskEnvironment $environment (Join-Path $dir 'bridge-task.json') $PassThroughVars
+        [pscustomobject]@{ TaskName = "$TaskName-$($account.Name)"; Dir = $dir; WorkDir = $account.WorkDir; Environment = $environment }
     }
-}
-$environment = [ordered]@{ WHATSAPP_BRIDGE_PORT = '8080' }
-# The bridge treats an empty value as unset, and PowerShell 7 can leave a
-# cleared variable defined but empty, so only non-empty values are kept.
-foreach ($name in 'WHATSAPP_BRIDGE_PORT', 'WEBHOOK_URL', 'WEBHOOK_ENABLED', 'WHATSAPP_AUTO_DOWNLOAD_MEDIA', 'FORWARD_SELF',
-    'WHATSAPP_BRIDGE_TOKEN', 'WHATSAPP_MEDIA_ROOTS', 'WHATSAPP_DEVICE_NAME') {
-    $value = [Environment]::GetEnvironmentVariable($name)
-    if (-not $value -and $saved) { $value = $saved.$name }
-    if ($value) { $environment[$name] = [string]$value }
-}
+} else {
+    $environment = [ordered]@{ WHATSAPP_BRIDGE_PORT = '8080' }
+    Add-TaskEnvironment $environment (Join-Path $AppDir 'bridge-task.json') (@('WHATSAPP_BRIDGE_PORT') + $PassThroughVars + 'WHATSAPP_BRIDGE_TOKEN')
+    $Port = $environment.WHATSAPP_BRIDGE_PORT
+    if ($Port -notmatch '^[0-9]{1,5}$' -or [int]$Port -lt 1 -or [int]$Port -gt 65535) {
+        Fail "WHATSAPP_BRIDGE_PORT must be a number between 1 and 65535, got: $Port"
+    }
+    [pscustomobject]@{ TaskName = $TaskName; Dir = $AppDir; WorkDir = $BridgeDir; Environment = $environment }
+})
 
-$Port = $environment.WHATSAPP_BRIDGE_PORT
-if ($Port -notmatch '^[0-9]{1,5}$' -or [int]$Port -lt 1 -or [int]$Port -gt 65535) {
-    Fail "WHATSAPP_BRIDGE_PORT must be a number between 1 and 65535, got: $Port"
-}
-
-New-Item -ItemType Directory -Force -Path $AppDir, $LogDir | Out-Null
+foreach ($bridge in $bridges) { New-Item -ItemType Directory -Force -Path (Join-Path $bridge.Dir 'logs') | Out-Null }
 
 # Build next to the current binary: Windows cannot overwrite an executable
 # while the existing task is still running it.
 $built = $false
-if (Test-CgoToolchain) {
+if ($Binary) {
+    if (-not (Test-Path -LiteralPath $Binary -PathType Leaf)) { Fail "Bridge binary not found: $Binary" }
+    $BridgeBinary = (Resolve-Path -LiteralPath $Binary).ProviderPath
+} elseif (Test-CgoToolchain) {
     Write-Host 'Building WhatsApp bridge...'
     Push-Location -LiteralPath $BridgeDir
     try { go build -o $NewBinary . } finally { Pop-Location }
@@ -231,22 +312,25 @@ try {
     Remove-Item -LiteralPath $launcherSourceFile -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host 'Stopping the existing whatsapp-mcp task if present...'
-Stop-InstalledTask
+Write-Host 'Stopping the existing whatsapp-mcp tasks if present...'
+foreach ($bridge in $bridges) { Stop-InstalledTask $bridge.TaskName }
 
 if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
-    # The stopped bridge can take a moment to release the port.
-    for ($i = 0; $i -lt 10; $i++) {
-        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$Port) -ErrorAction SilentlyContinue)
-        if ($listeners.Count -eq 0) { break }
-        Start-Sleep -Milliseconds 500
-    }
-    if ($listeners.Count -gt 0) {
-        foreach ($listener in $listeners) {
-            $owner = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
-            Write-Host ("  {0}:{1} pid {2} {3}" -f $listener.LocalAddress, $listener.LocalPort, $listener.OwningProcess, $owner.Path)
+    foreach ($bridge in $bridges) {
+        $Port = $bridge.Environment.WHATSAPP_BRIDGE_PORT
+        # The stopped bridge can take a moment to release the port.
+        for ($i = 0; $i -lt 10; $i++) {
+            $listeners = @(Get-NetTCPConnection -State Listen -LocalPort ([int]$Port) -ErrorAction SilentlyContinue)
+            if ($listeners.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 500
         }
-        Fail "Port $Port is already in use after stopping the existing whatsapp-mcp task."
+        if ($listeners.Count -gt 0) {
+            foreach ($listener in $listeners) {
+                $owner = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+                Write-Host ("  {0}:{1} pid {2} {3}" -f $listener.LocalAddress, $listener.LocalPort, $listener.OwningProcess, $owner.Path)
+            }
+            Fail "Port $Port is already in use after stopping the existing $($bridge.TaskName) task."
+        }
     }
 }
 
@@ -257,42 +341,15 @@ if ($built) {
         Fail "Could not replace $BridgeBinary; is a bridge you started by hand still running it? $($_.Exception.Message)"
     }
 }
-try {
-    Move-Item -LiteralPath $NewLauncher -Destination $Launcher -Force
-} catch {
-    Fail "Could not replace $Launcher; is the launcher still running? $($_.Exception.Message)"
-}
-
-$config = [ordered]@{
-    BridgeDir           = $BridgeDir
-    BridgeBinary        = $BridgeBinary
-    LogDir              = $LogDir
-    RestartDelaySeconds = $RestartDelaySeconds
-    Environment         = $environment
-}
-$utf8 = [System.Text.UTF8Encoding]::new($false)
-# The config can hold WHATSAPP_BRIDGE_TOKEN, so only the current user may read
-# it. Restrict the file before anything is written into it, replacing its whole
-# access list: icacls /grant:r would keep other explicit entries, such as the
-# SYSTEM and Administrators entries a file can get when created elevated.
-[System.IO.File]::WriteAllText($ConfigFile, '', $utf8)
-$acl = [System.Security.AccessControl.FileSecurity]::new()
-$acl.SetAccessRuleProtection($true, $false)
-$acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($Identity.User, 'FullControl', 'Allow'))
-# Set-Acl would also write the audit list, which needs a privilege that
-# standard accounts lack. .NET Framework (Windows PowerShell) has an instance
-# method; .NET in PowerShell 7 has an extension class instead.
-$file = [System.IO.FileInfo]::new($ConfigFile)
-try {
-    if ('System.IO.FileSystemAclExtensions' -as [type]) {
-        [System.IO.FileSystemAclExtensions]::SetAccessControl($file, $acl)
-    } else {
-        $file.SetAccessControl($acl)
+foreach ($bridge in $bridges) {
+    $launcher = Join-Path $bridge.Dir 'whatsapp-bridge-launcher.exe'
+    try {
+        Copy-Item -LiteralPath $NewLauncher -Destination $launcher -Force
+    } catch {
+        Fail "Could not replace $launcher; is the launcher still running? $($_.Exception.Message)"
     }
-} catch {
-    Fail "Could not restrict access to ${ConfigFile}: $($_.Exception.Message)"
 }
-[System.IO.File]::WriteAllText($ConfigFile, ($config | ConvertTo-Json), $utf8)
+Remove-Item -LiteralPath $NewLauncher -Force
 
 $runner = @'
 # Generated by scripts/install-task-windows.ps1; re-run the installer instead
@@ -352,23 +409,57 @@ while ($true) {
     Start-Sleep -Seconds $config.RestartDelaySeconds
 }
 '@
-[System.IO.File]::WriteAllText($RunnerScript, $runner, $utf8)
-
-$action = New-ScheduledTaskAction -Execute $Launcher -WorkingDirectory $BridgeDir
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $Identity.Name
-$principal = New-ScheduledTaskPrincipal -UserId $Identity.Name -LogonType Interactive -RunLevel Limited
+$utf8 = [System.Text.UTF8Encoding]::new($false)
 # The runner restarts the bridge 10 seconds after it exits, like launchd's
 # KeepAlive and ThrottleInterval; Task Scheduler's own restart setting cannot
 # retry sooner than once a minute. The runner is meant to run for the whole
 # session, so the task must never hit the default 72-hour time limit or refuse
 # to start on battery power.
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $Identity.Name
+$principal = New-ScheduledTaskPrincipal -UserId $Identity.Name -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
 
-Write-Host 'Registering the whatsapp-mcp Task Scheduler task...'
-Register-ScheduledTask @Task -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force `
-    -Description 'Starts the WhatsApp MCP bridge at login and restarts it when it exits. Installed by scripts/install-task-windows.ps1.' | Out-Null
-Start-ScheduledTask @Task
+foreach ($bridge in $bridges) {
+    $configFile = Join-Path $bridge.Dir 'bridge-task.json'
+    $config = [ordered]@{
+        BridgeDir           = $bridge.WorkDir
+        BridgeBinary        = $BridgeBinary
+        LogDir              = Join-Path $bridge.Dir 'logs'
+        RestartDelaySeconds = $RestartDelaySeconds
+        Environment         = $bridge.Environment
+    }
+    # The config can hold WHATSAPP_BRIDGE_TOKEN, so only the current user may
+    # read it. Restrict the file before anything is written into it, replacing
+    # its whole access list: icacls /grant:r would keep other explicit entries,
+    # such as the SYSTEM and Administrators entries a file can get when created
+    # elevated.
+    [System.IO.File]::WriteAllText($configFile, '', $utf8)
+    $acl = [System.Security.AccessControl.FileSecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($Identity.User, 'FullControl', 'Allow'))
+    # Set-Acl would also write the audit list, which needs a privilege that
+    # standard accounts lack. .NET Framework (Windows PowerShell) has an
+    # instance method; .NET in PowerShell 7 has an extension class instead.
+    $file = [System.IO.FileInfo]::new($configFile)
+    try {
+        if ('System.IO.FileSystemAclExtensions' -as [type]) {
+            [System.IO.FileSystemAclExtensions]::SetAccessControl($file, $acl)
+        } else {
+            $file.SetAccessControl($acl)
+        }
+    } catch {
+        Fail "Could not restrict access to ${configFile}: $($_.Exception.Message)"
+    }
+    [System.IO.File]::WriteAllText($configFile, ($config | ConvertTo-Json), $utf8)
+    [System.IO.File]::WriteAllText((Join-Path $bridge.Dir 'run-whatsapp-bridge.ps1'), $runner, $utf8)
 
-Write-Host "Installed Task Scheduler task: $($Task.TaskName)"
-Write-Host "Logs: $LogDir"
+    $action = New-ScheduledTaskAction -Execute (Join-Path $bridge.Dir 'whatsapp-bridge-launcher.exe') -WorkingDirectory $bridge.WorkDir
+    Write-Host "Registering the $($bridge.TaskName) Task Scheduler task..."
+    Register-ScheduledTask -TaskName $bridge.TaskName -TaskPath '\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force `
+        -Description 'Starts the WhatsApp MCP bridge at login and restarts it when it exits. Installed by scripts/install-task-windows.ps1.' | Out-Null
+    Start-ScheduledTask -TaskName $bridge.TaskName -TaskPath '\'
+
+    Write-Host "Installed Task Scheduler task: $($bridge.TaskName)"
+    Write-Host "Logs: $($config.LogDir)"
+}

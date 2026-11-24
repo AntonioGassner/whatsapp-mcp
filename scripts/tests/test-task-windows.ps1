@@ -6,6 +6,9 @@ $PassThroughVars = @(
     'WHATSAPP_BRIDGE_PORT', 'WEBHOOK_URL', 'WEBHOOK_ENABLED', 'WHATSAPP_AUTO_DOWNLOAD_MEDIA',
     'FORWARD_SELF', 'WHATSAPP_BRIDGE_TOKEN', 'WHATSAPP_MEDIA_ROOTS', 'WHATSAPP_DEVICE_NAME'
 )
+# Set on the machine running the tests, it would switch every test to accounts
+# mode.
+$ScriptVars = $PassThroughVars + 'WHATSAPP_ACCOUNTS_FILE'
 
 $script:Failures = 0
 $script:Fixtures = [System.Collections.Generic.List[string]]::new()
@@ -37,6 +40,8 @@ function Assert-Contains([string]$Haystack, [string]$Needle, [string]$What) {
 Import-Module ScheduledTasks, NetTCPIP
 
 $global:FakeCalls = [System.Collections.Generic.List[string]]::new()
+# Registered tasks by name; FakeRegistered is the last one registered.
+$global:FakeTasks = [ordered]@{}
 $global:FakeRegistered = $null
 $global:FakeCgoEnabled = '1'
 $global:FakeListener = $null
@@ -57,7 +62,9 @@ function global:fake-gcc {}
 function global:Get-ScheduledTask {
     [CmdletBinding()]
     param([string]$TaskName, [string]$TaskPath)
-    if ($global:FakeRegistered) { [pscustomobject]@{ TaskName = $TaskName; State = 'Ready' } }
+    foreach ($name in @($global:FakeTasks.Keys)) {
+        if (-not $TaskName -or $name -eq $TaskName) { [pscustomobject]@{ TaskName = $name; TaskPath = '\'; State = 'Ready' } }
+    }
 }
 
 function global:Register-ScheduledTask {
@@ -65,13 +72,15 @@ function global:Register-ScheduledTask {
     param([string]$TaskName, [string]$TaskPath, $Action, $Trigger, $Settings, $Principal, [string]$Description, [switch]$Force)
     $global:FakeCalls.Add("Register-ScheduledTask $TaskPath$TaskName")
     $global:FakeRegistered = [pscustomobject]$PSBoundParameters
+    $global:FakeTasks[$TaskName] = $global:FakeRegistered
 }
 
 function global:Unregister-ScheduledTask {
     [CmdletBinding()]
     param([string]$TaskName, [string]$TaskPath, [switch]$Confirm)
     $global:FakeCalls.Add("Unregister-ScheduledTask $TaskPath$TaskName")
-    $global:FakeRegistered = $null
+    $global:FakeTasks.Remove($TaskName)
+    if ($global:FakeRegistered.TaskName -eq $TaskName) { $global:FakeRegistered = $null }
 }
 
 function global:Start-ScheduledTask {
@@ -90,7 +99,7 @@ function global:Get-NetTCPConnection {
     [CmdletBinding()]
     param([string]$State, [int]$LocalPort)
     $global:FakeCalls.Add("Get-NetTCPConnection $LocalPort")
-    if ($global:FakeListener) { $global:FakeListener }
+    if ($global:FakeListener.LocalPort -eq $LocalPort) { $global:FakeListener }
 }
 
 foreach ($name in 'Get-ScheduledTask', 'Register-ScheduledTask', 'Unregister-ScheduledTask', 'Start-ScheduledTask', 'Stop-ScheduledTask', 'Get-NetTCPConnection') {
@@ -139,6 +148,7 @@ function New-Fixture {
     }
     Copy-Item -Path "$RepoRoot\scripts\*-task-windows.ps1" -Destination "$root\repo\scripts\"
     $global:FakeCalls.Clear()
+    $global:FakeTasks.Clear()
     $global:FakeRegistered = $null
     $global:FakeCgoEnabled = '1'
     $global:FakeListener = $null
@@ -153,16 +163,17 @@ function Set-ProcessEnv([string]$Name, $Value) {
     else { Set-Item -LiteralPath "Env:$Name" -Value $Value }
 }
 
-function Invoke-TaskScript([string]$Root, [string]$Name, [hashtable]$Environment = @{}) {
-    $names = @('LOCALAPPDATA') + $PassThroughVars
+function Invoke-TaskScript([string]$Root, [string]$Name, [hashtable]$Environment = @{}, [hashtable]$Parameters = @{}) {
+    $names = @('LOCALAPPDATA') + $ScriptVars
     $saved = @{}
     foreach ($n in $names) { $saved[$n] = [Environment]::GetEnvironmentVariable($n, 'Process') }
     try {
-        foreach ($n in $PassThroughVars) { Set-ProcessEnv $n $null }
+        foreach ($n in $ScriptVars) { Set-ProcessEnv $n $null }
         Set-ProcessEnv 'LOCALAPPDATA' "$Root\localappdata"
         foreach ($n in $Environment.Keys) { Set-ProcessEnv $n $Environment[$n] }
         $global:LASTEXITCODE = 0
-        $output = & "$Root\repo\scripts\$Name" *>&1 | Out-String
+        # Wide enough that a message naming a long path is not wrapped.
+        $output = & "$Root\repo\scripts\$Name" @Parameters *>&1 | Out-String -Width 1000
         return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
     } finally {
         foreach ($n in $names) { Set-ProcessEnv $n $saved[$n] }
@@ -180,11 +191,13 @@ function Set-RestartDelay([string]$Root, [int]$Seconds = 1) {
 }
 
 # Starts the launcher the way the task does; it starts the runner, which starts
-# the bridge.
-function Start-Launcher([string]$Root, [hashtable]$Environment) {
+# the bridge. With an account, starts that account's launcher.
+function Start-Launcher([string]$Root, [hashtable]$Environment, [string]$Account) {
+    $dir = "$Root\localappdata\whatsapp-mcp"
+    if ($Account) { $dir += "\$Account" }
     foreach ($n in $Environment.Keys) { Set-ProcessEnv $n $Environment[$n] }
     try {
-        Start-Process -FilePath "$Root\localappdata\whatsapp-mcp\whatsapp-bridge-launcher.exe" -PassThru
+        Start-Process -FilePath "$dir\whatsapp-bridge-launcher.exe" -PassThru
     } finally {
         foreach ($n in $Environment.Keys) { Set-ProcessEnv $n $null }
     }
@@ -224,7 +237,9 @@ function Read-Log([string]$Path) {
 
 function Get-MatchCount([string]$Path, [string]$Pattern) {
     if (-not (Test-Path -LiteralPath $Path)) { return 0 }
-    try { $text = Read-Log $Path } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return 0 }
+    # Also while the launcher, which does not share runner.log, appends to it:
+    # Wait-Until polls again.
+    try { $text = Read-Log $Path } catch [System.IO.IOException] { return 0 }
     return [regex]::Matches($text, $Pattern).Count
 }
 
@@ -444,6 +459,216 @@ function Test-UninstallRemovesGeneratedFilesOnly {
     Assert-File "$app\logs\bridge.out.log"
 }
 
+# Writes the accounts file to <root>\accounts\accounts.json, where a relative
+# store_dir starts.
+function New-AccountsFile([string]$Root, [object[]]$Entries) {
+    $path = "$Root\accounts\accounts.json"
+    New-Item -ItemType Directory -Force -Path "$Root\accounts" | Out-Null
+    [System.IO.File]::WriteAllText($path, (ConvertTo-Json -InputObject $Entries -Depth 3))
+    return $path
+}
+
+function New-ThreeAccountsFile([string]$Root) {
+    New-AccountsFile $Root @(
+        @{ name = 'personal'; store_dir = 'personal\store'; api_url = 'http://localhost:8081/api' },
+        @{ name = 'work'; store_dir = "$Root\wa\work\store"; api_url = 'http://127.0.0.1:8082/api' },
+        @{ name = 'shop'; store_dir = '../shop/store/'; api_url = 'http://localhost:8083' }
+    )
+}
+
+function Read-AccountConfig([string]$Root, [string]$Name) {
+    [System.IO.File]::ReadAllText("$Root\localappdata\whatsapp-mcp\$Name\bridge-task.json") | ConvertFrom-Json
+}
+
+function Test-InstallRegistersTaskPerAccount {
+    $root = New-Fixture
+    $accountsFile = New-ThreeAccountsFile $root
+    $result = Invoke-TaskScript $root 'install-task-windows.ps1' @{
+        WHATSAPP_ACCOUNTS_FILE = $accountsFile
+        WEBHOOK_URL            = 'http://127.0.0.1:8769/whatsapp/webhook'
+        WHATSAPP_BRIDGE_PORT   = '9090'
+        WHATSAPP_BRIDGE_TOKEN  = 'one-token-for-every-bridge'
+    }
+    Assert-Equal 0 $result.ExitCode "installer exit code ($($result.Output))"
+
+    $app = "$root\localappdata\whatsapp-mcp"
+    $expected = [ordered]@{
+        personal = @{ Dir = "$root\accounts\personal"; Port = '8081' }
+        work     = @{ Dir = "$root\wa\work"; Port = '8082' }
+        shop     = @{ Dir = "$root\shop"; Port = '8083' }
+    }
+    Assert-Equal 'whatsapp-mcp-bridge-personal whatsapp-mcp-bridge-work whatsapp-mcp-bridge-shop' (@($global:FakeTasks.Keys) -join ' ') 'registered tasks'
+    $calls = $global:FakeCalls -join "`n"
+    foreach ($name in $expected.Keys) {
+        $account = $expected[$name]
+        $task = $global:FakeTasks["whatsapp-mcp-bridge-$name"]
+        if (-not $task) { continue }
+        Assert-Equal "$app\$name\whatsapp-bridge-launcher.exe" $task.Action.Execute "$name action executable"
+        Assert-Equal $account.Dir $task.Action.WorkingDirectory "$name action working directory"
+        Assert-File "$app\$name\run-whatsapp-bridge.ps1"
+        Assert-File "$app\$name\whatsapp-bridge-launcher.exe"
+        $config = Read-AccountConfig $root $name
+        Assert-Equal $account.Dir $config.BridgeDir "$name BridgeDir"
+        Assert-Equal "$root\repo\whatsapp-bridge\whatsapp-bridge.exe" $config.BridgeBinary "$name BridgeBinary"
+        Assert-Equal "$app\$name\logs" $config.LogDir "$name LogDir"
+        Assert-Equal $account.Port $config.Environment.WHATSAPP_BRIDGE_PORT "$name WHATSAPP_BRIDGE_PORT"
+        Assert-Equal 'http://127.0.0.1:8769/whatsapp/webhook' $config.Environment.WEBHOOK_URL "$name WEBHOOK_URL"
+        Assert-Equal $null $config.Environment.WHATSAPP_BRIDGE_TOKEN "$name WHATSAPP_BRIDGE_TOKEN"
+        Assert-OnlyCurrentUserCanAccess "$app\$name\bridge-task.json"
+        Assert-Contains $calls "Get-NetTCPConnection $($account.Port)" 'commands'
+        Assert-Contains $calls "Start-ScheduledTask \whatsapp-mcp-bridge-$name" 'commands'
+    }
+    Assert-NotExists "$app\bridge-task.json"
+    Assert-NotExists "$app\whatsapp-bridge-launcher.new.exe"
+}
+
+function Test-InstallPrefersAccountsFileParameter {
+    $root = New-Fixture
+    $accountsFile = New-AccountsFile $root @(
+        @{ name = 'solo'; store_dir = 'solo\store'; api_url = 'http://localhost:8091/api' }
+    )
+    $result = Invoke-TaskScript $root 'install-task-windows.ps1' @{ WHATSAPP_ACCOUNTS_FILE = "$root\missing.json" } @{ AccountsFile = $accountsFile }
+    Assert-Equal 0 $result.ExitCode "installer exit code ($($result.Output))"
+    Assert-Equal 'whatsapp-mcp-bridge-solo' (@($global:FakeTasks.Keys) -join ' ') 'registered tasks'
+    Assert-Equal "$root\accounts\solo" (Read-AccountConfig $root 'solo').BridgeDir 'BridgeDir'
+}
+
+function Test-InstallRefusesUnusableAccountsFile {
+    $personal = @{ name = 'personal'; store_dir = 'personal\store'; api_url = 'http://localhost:8081/api' }
+    $cases = @(
+        @{ Json = $null; Expected = 'Accounts file not found' },
+        @{ Json = '[{"name": "personal",'; Expected = 'is not valid JSON' },
+        @{ Entries = @($personal, @{ name = 'work'; store_dir = 'work\data'; api_url = 'http://localhost:8082/api' })
+            Expected = "entry 2 ('work') has store_dir 'work\data', whose last folder is not 'store'" },
+        @{ Entries = @($personal, @{ name = 'work'; store_dir = 'work\store'; api_url = 'http://localhost/api' })
+            Expected = "entry 2 ('work') has api_url 'http://localhost/api' without an explicit port" },
+        @{ Entries = @($personal, @{ name = 'work'; store_dir = 'work\store'; api_url = 'http://127.0.0.1:8081/api' })
+            Expected = "entry 2 ('work') uses port 8081, like entry 1" }
+    )
+    foreach ($case in $cases) {
+        $root = New-Fixture
+        $accountsFile = "$root\accounts\accounts.json"
+        if ($case.Entries) { New-AccountsFile $root $case.Entries | Out-Null }
+        elseif ($case.Json) { New-AccountsFile $root @() | Out-Null; [System.IO.File]::WriteAllText($accountsFile, $case.Json) }
+        $result = Invoke-TaskScript $root 'install-task-windows.ps1' @{ WHATSAPP_ACCOUNTS_FILE = $accountsFile }
+        Assert-Equal 1 $result.ExitCode "installer exit code for '$($case.Expected)'"
+        Assert-Contains $result.Output $case.Expected 'installer output'
+        if ($global:FakeCalls -match '^(Stop|Register|Start)-ScheduledTask') { Fail "expected no task to be touched for '$($case.Expected)'" }
+    }
+}
+
+function Test-ReinstallAccountsKeepsSavedSettings {
+    $root = New-Fixture
+    $accountsFile = New-ThreeAccountsFile $root
+    $result = Invoke-TaskScript $root 'install-task-windows.ps1' @{
+        WHATSAPP_ACCOUNTS_FILE = $accountsFile
+        WEBHOOK_URL            = 'http://127.0.0.1:8769/whatsapp/webhook'
+        FORWARD_SELF           = 'false'
+    }
+    Assert-Equal 0 $result.ExitCode "installer exit code ($($result.Output))"
+
+    # The work account moves to another port; the file decides it, not the saved
+    # settings.
+    New-AccountsFile $root @(
+        @{ name = 'personal'; store_dir = 'personal\store'; api_url = 'http://localhost:8081/api' },
+        @{ name = 'work'; store_dir = "$root\wa\work\store"; api_url = 'http://127.0.0.1:8092/api' },
+        @{ name = 'shop'; store_dir = '../shop/store/'; api_url = 'http://localhost:8083' }
+    ) | Out-Null
+    $global:FakeCalls.Clear()
+    $result = Invoke-TaskScript $root 'install-task-windows.ps1' @{
+        WHATSAPP_ACCOUNTS_FILE = $accountsFile
+        WEBHOOK_URL            = 'http://127.0.0.1:9999/hook'
+    }
+    Assert-Equal 0 $result.ExitCode "reinstall exit code ($($result.Output))"
+    $calls = $global:FakeCalls -join "`n"
+    foreach ($name in 'personal', 'work', 'shop') {
+        $config = Read-AccountConfig $root $name
+        Assert-Equal 'http://127.0.0.1:9999/hook' $config.Environment.WEBHOOK_URL "$name overridden WEBHOOK_URL"
+        Assert-Equal 'false' $config.Environment.FORWARD_SELF "$name saved FORWARD_SELF"
+        Assert-Contains $calls "Stop-ScheduledTask \whatsapp-mcp-bridge-$name" 'commands'
+        Assert-Contains $calls "Register-ScheduledTask \whatsapp-mcp-bridge-$name" 'commands'
+    }
+    Assert-Equal '8092' (Read-AccountConfig $root 'work').Environment.WHATSAPP_BRIDGE_PORT 'work WHATSAPP_BRIDGE_PORT after moving'
+}
+
+function Test-InstallRefusesBusyAccountPort {
+    $root = New-Fixture
+    $accountsFile = New-ThreeAccountsFile $root
+    $global:FakeListener = [pscustomobject]@{ LocalAddress = '127.0.0.1'; LocalPort = 8082; OwningProcess = $PID }
+    $result = Invoke-TaskScript $root 'install-task-windows.ps1' @{ WHATSAPP_ACCOUNTS_FILE = $accountsFile }
+    Assert-Equal 1 $result.ExitCode 'installer exit code'
+    Assert-Contains $result.Output 'Port 8082 is already in use after stopping the existing whatsapp-mcp-bridge-work task' 'installer output'
+    if ($global:FakeCalls -match '^Register-ScheduledTask') { Fail 'expected no task to be registered' }
+}
+
+function Test-UninstallRemovesEveryBridgeTask {
+    $root = New-Fixture
+    $accountsFile = New-ThreeAccountsFile $root
+    Assert-Equal 0 (Invoke-TaskScript $root 'install-task-windows.ps1').ExitCode 'single-bridge installer exit code'
+    Assert-Equal 0 (Invoke-TaskScript $root 'install-task-windows.ps1' @{ WHATSAPP_ACCOUNTS_FILE = $accountsFile }).ExitCode 'accounts installer exit code'
+    $global:FakeTasks['whatsapp-mcp-monitor'] = [pscustomobject]@{ TaskName = 'whatsapp-mcp-monitor' }
+    $app = "$root\localappdata\whatsapp-mcp"
+    New-Item -ItemType Directory -Force -Path "$root\wa\work\store" | Out-Null
+    Set-Content -LiteralPath "$root\wa\work\store\messages.db" -Value 'db'
+    Set-Content -LiteralPath "$app\work\logs\bridge.out.log" -Value 'log'
+
+    $result = Invoke-TaskScript $root 'uninstall-task-windows.ps1'
+    Assert-Equal 0 $result.ExitCode "uninstaller exit code ($($result.Output))"
+    Assert-Equal 'whatsapp-mcp-monitor' (@($global:FakeTasks.Keys) -join ' ') 'tasks left registered'
+    foreach ($dir in $app, "$app\personal", "$app\work", "$app\shop") {
+        Assert-NotExists "$dir\whatsapp-bridge-launcher.exe"
+        Assert-NotExists "$dir\run-whatsapp-bridge.ps1"
+        Assert-NotExists "$dir\bridge-task.json"
+    }
+    Assert-File "$root\wa\work\store\messages.db"
+    Assert-File "$app\work\logs\bridge.out.log"
+}
+
+function Test-UninstallNameRemovesOnlyThatAccount {
+    $root = New-Fixture
+    $accountsFile = New-ThreeAccountsFile $root
+    Assert-Equal 0 (Invoke-TaskScript $root 'install-task-windows.ps1').ExitCode 'single-bridge installer exit code'
+    Assert-Equal 0 (Invoke-TaskScript $root 'install-task-windows.ps1' @{ WHATSAPP_ACCOUNTS_FILE = $accountsFile }).ExitCode 'accounts installer exit code'
+    $app = "$root\localappdata\whatsapp-mcp"
+    Set-Content -LiteralPath "$app\work\logs\bridge.out.log" -Value 'log'
+
+    $result = Invoke-TaskScript $root 'uninstall-task-windows.ps1' @{} @{ Name = 'work' }
+    Assert-Equal 0 $result.ExitCode "uninstaller exit code ($($result.Output))"
+    Assert-Equal 'whatsapp-mcp-bridge whatsapp-mcp-bridge-personal whatsapp-mcp-bridge-shop' (@($global:FakeTasks.Keys) -join ' ') 'tasks left registered'
+    Assert-NotExists "$app\work\whatsapp-bridge-launcher.exe"
+    Assert-NotExists "$app\work\run-whatsapp-bridge.ps1"
+    Assert-NotExists "$app\work\bridge-task.json"
+    Assert-File "$app\work\logs\bridge.out.log"
+    foreach ($dir in $app, "$app\personal", "$app\shop") {
+        Assert-File "$dir\whatsapp-bridge-launcher.exe"
+        Assert-File "$dir\run-whatsapp-bridge.ps1"
+        Assert-File "$dir\bridge-task.json"
+    }
+}
+
+function Test-AccountTaskRunsGivenBinaryInStoreParent {
+    $root = New-Fixture
+    $accountsFile = New-ThreeAccountsFile $root
+    New-Item -ItemType Directory -Force -Path "$root\wa\work\store", "$root\bin" | Out-Null
+    Copy-Item -LiteralPath $global:FakeBridgeExe -Destination "$root\bin\bridge.exe"
+    $result = Invoke-TaskScript $root 'install-task-windows.ps1' @{} @{ AccountsFile = $accountsFile; Binary = "$root\bin\bridge.exe" }
+    Assert-Equal 0 $result.ExitCode "installer exit code ($($result.Output))"
+    if ($global:FakeCalls -match '^go build') { Fail 'expected no go build with -Binary' }
+    Assert-Equal "$root\bin\bridge.exe" (Read-AccountConfig $root 'work').BridgeBinary 'BridgeBinary'
+
+    $logs = "$root\localappdata\whatsapp-mcp\work\logs"
+    $launcher = Start-Launcher $root @{ FAKE_BRIDGE_EXIT_CODE = '3' } 'work'
+    try {
+        $ran = Wait-Until { (Get-MatchCount "$logs\runner.log" 'Bridge exited with code 3') -ge 1 }
+    } finally {
+        Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $ran) { Fail 'expected the work account launcher to run the bridge'; return }
+    $out = Read-Log "$logs\bridge.out.log"
+    Assert-Contains $out "cwd=$root\wa\work" 'bridge.out.log'
+    Assert-Contains $out 'port=8082' 'bridge.out.log'
+}
+
 # Task Scheduler ends only the launcher when the task is stopped; its job
 # object must end the runner and the bridge with it.
 function Test-KillingLauncherStopsRunnerAndBridge {
@@ -488,7 +713,15 @@ foreach ($test in @(
     'Test-RunnerRestartsBridgeAndAppendsLogs',
     'Test-RunnerSurvivesLogFolderRemoval',
     'Test-UninstallRemovesGeneratedFilesOnly',
-    'Test-KillingLauncherStopsRunnerAndBridge'
+    'Test-KillingLauncherStopsRunnerAndBridge',
+    'Test-InstallRegistersTaskPerAccount',
+    'Test-InstallPrefersAccountsFileParameter',
+    'Test-AccountTaskRunsGivenBinaryInStoreParent',
+    'Test-InstallRefusesUnusableAccountsFile',
+    'Test-ReinstallAccountsKeepsSavedSettings',
+    'Test-InstallRefusesBusyAccountPort',
+    'Test-UninstallRemovesEveryBridgeTask',
+    'Test-UninstallNameRemovesOnlyThatAccount'
 )) {
     Write-Host "Running $test"
     try { & $test } catch { Fail "$test threw: $_" }
