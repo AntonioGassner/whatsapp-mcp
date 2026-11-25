@@ -233,11 +233,10 @@ function Read-Log([string]$Path) {
 }
 
 # The arguments the runner gave the bridge, as the fake bridge printed them.
-# Exactly --qr-browser: a bridge that needs pairing opens its QR code in the
-# browser, and a restart never asks the phone for a full resync
-# (--full-history-pair).
+# Exactly --qr-browser --full-history-pair: a bridge that needs pairing opens
+# its QR code in the browser and asks the phone for all its history.
 function Assert-BridgeArguments([string]$Out, [string]$What) {
-    Assert-Equal '--qr-browser' ([regex]::Match($Out, 'args=([^\r\n]*)').Groups[1].Value) "$What bridge arguments"
+    Assert-Equal '--qr-browser --full-history-pair' ([regex]::Match($Out, 'args=([^\r\n]*)').Groups[1].Value) "$What bridge arguments"
 }
 
 function Get-MatchCount([string]$Path, [string]$Pattern) {

@@ -394,9 +394,11 @@ while ($true) {
         $out = Open-Log 'bridge.out.log'
         $err = Open-Log 'bridge.err.log'
         # The bridge has no terminal to draw a QR code in, so a bridge that
-        # needs pairing opens it in the browser instead. --full-history-pair is
-        # never passed: a restart must not ask the phone for a full resync.
-        $info = [System.Diagnostics.ProcessStartInfo]::new($config.BridgeBinary, '--qr-browser')
+        # needs pairing opens it in the browser instead. --full-history-pair
+        # only changes what a pairing asks the phone for, so a restart of a
+        # linked bridge never triggers a resync, and every new or repeated
+        # link asks for all the history the phone will give.
+        $info = [System.Diagnostics.ProcessStartInfo]::new($config.BridgeBinary, '--qr-browser --full-history-pair')
         $info.WorkingDirectory = $config.BridgeDir
         $info.UseShellExecute = $false
         $info.CreateNoWindow = $true

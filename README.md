@@ -919,9 +919,12 @@ The task runs the bridge without a terminal, so it starts the bridge with
 `--qr-browser`: when the bridge needs to link a phone, it opens the QR code in
 your default browser (see
 [Link or re-link a phone on Windows](#link-or-re-link-a-phone-on-windows)). It
-never passes `--full-history-pair`, so a restart never asks the phone for a
-full resync. Stop any bridge you started by hand, then run from the repository
-root:
+also passes `--full-history-pair`, so every link or re-link asks the phone for
+all the history it will share (see
+[Requesting full history](#requesting-full-history)). The flag only changes
+what a pairing asks for: restarting a bridge that is already linked never
+triggers a resync. Stop any bridge you started by hand, then run from the
+repository root:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-task-windows.ps1
@@ -1020,6 +1023,14 @@ Alternatively, ask the
 running bridge for a new code with `POST /api/connection/reconnect` (see
 [Connection status and phone linking](#connection-status-and-phone-linking)),
 using the token in that account's `store\.bridge-token`.
+
+Every link made through the task asks the phone for full history
+(`--full-history-pair`). History sync can take a while after the phone is
+linked; the bridge stores it as it arrives. An account linked earlier without
+the flag keeps the history it got then. To ask for the rest, unlink the bridge
+on the phone (WhatsApp → Settings → Linked devices → the bridge → Log out),
+restart that account's task as above, and scan the new code. The messages
+already in `messages.db` are kept.
 
 #### Several accounts on Windows
 
