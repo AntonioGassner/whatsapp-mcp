@@ -3164,6 +3164,24 @@ func main() {
 	if info, err := os.Stdout.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
 		connection.renderQR = func(code string) { qrterminal.GenerateHalfBlock(code, qrterminal.L, os.Stdout) }
 	}
+	if *qrBrowserFlag {
+		page := &pairingQRPage{path: pairingQRPagePath, open: openInBrowser}
+		renderTerminal := connection.renderQR
+		connection.renderQR = func(code string) {
+			if renderTerminal != nil {
+				renderTerminal(code)
+			}
+			if err := page.show(code); err != nil {
+				logger.Warnf("Could not show the pairing QR code in the browser: %v", err)
+			}
+		}
+		connection.pairingEnded = func(linked bool) {
+			if err := page.finish(linked); err != nil {
+				logger.Warnf("Could not update %s: %v", pairingQRPagePath, err)
+			}
+		}
+		logger.Infof("--qr-browser enabled: the pairing QR code opens in your browser (%s)", mustAbs(pairingQRPagePath))
+	}
 
 	// Setup event handling for messages and history sync
 	eventHandler := func(client *whatsmeow.Client, evt interface{}) {

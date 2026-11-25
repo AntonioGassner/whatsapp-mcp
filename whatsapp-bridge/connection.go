@@ -47,6 +47,9 @@ type connectionManager struct {
 	qrChannel      func(context.Context) (<-chan whatsmeow.QRChannelItem, error)
 	preparePairing func()
 	renderQR       func(string)
+	// pairingEnded, if set, runs once when a pairing attempt that may have
+	// shown a QR code ends; linked reports whether the phone was linked.
+	pairingEnded func(linked bool)
 }
 
 func newConnectionManager(paired bool) *connectionManager {
@@ -181,6 +184,15 @@ func (c *connectionManager) attempt(paired bool) {
 		return
 	}
 
+	ended := false
+	endPairing := func(linked bool) {
+		if !ended && c.pairingEnded != nil {
+			ended = true
+			c.pairingEnded(linked)
+		}
+	}
+	defer endPairing(false)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -210,6 +222,7 @@ func (c *connectionManager) attempt(paired bool) {
 					c.setLocked("connecting", "Phone linked. Finishing the connection…", "")
 				}
 				c.mu.Unlock()
+				endPairing(true)
 				c.waitForAuthentication()
 				return
 			case "err-client-outdated":

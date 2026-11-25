@@ -653,6 +653,9 @@ when the machine or a backup is lost.
    launchctl bootout "gui/$(id -u)/com.whatsapp-mcp.bridge"
    ```
 
+   On Windows, run `scripts\uninstall-task-windows.ps1` if you installed the
+   task; stopping the task also stops the bridge it runs.
+
    For a manually started bridge, stop it in its terminal. Confirm all bridge
    and MCP server processes have exited. Never copy live SQLite databases.
 
@@ -736,6 +739,11 @@ when the machine or a backup is lost.
      "$HOME/Library/LaunchAgents/com.whatsapp-mcp.bridge-monitor.plist"
    ```
 
+   **Windows Task Scheduler:** without an accounts file the task always runs
+   the bridge from the checkout's `whatsapp-bridge\` directory, so start a
+   relocated bridge manually, or list it in an accounts file and install a task
+   per account (see [Several accounts on Windows](#several-accounts-on-windows)).
+
    Check that the bridge reconnects with the existing session and that the MCP
    client can read known history. An unexpected QR pairing prompt or empty
    history is a reason to stop and recheck paths before proceeding.
@@ -764,7 +772,9 @@ point a single MCP server at all of them with an accounts file.
    cd ~/wa/work     && WHATSAPP_BRIDGE_PORT=8082 ./whatsapp-bridge
    ```
 
-   Pair each one with its own phone (WhatsApp → Linked Devices).
+   Pair each one with its own phone (WhatsApp → Linked Devices). When pairing
+   several at once, `--qr-browser` opens one tab per bridge, titled with the
+   bridge's folder name.
 
 2. List the accounts in a JSON file:
 
@@ -898,11 +908,182 @@ Uninstall preserves `whatsapp-bridge/store/`, including WhatsApp session DBs,
 message DBs, media, and `.bridge-token`. Logs are left in
 `~/Library/Logs/whatsapp-mcp/` for manual cleanup.
 
+### Run automatically on Windows
+
+Windows users can install an optional per-user Task Scheduler task that starts
+the Go bridge at login and starts it again whenever it exits, for example after
+a crash. The installer does not need administrator rights, stores no password,
+and does not install or start the MCP server.
+
+The task runs the bridge without a terminal, so it starts the bridge with
+`--qr-browser`: when the bridge needs to link a phone, it opens the QR code in
+your default browser (see
+[Link or re-link a phone on Windows](#link-or-re-link-a-phone-on-windows)). It
+also passes `--full-history-pair`, so every link or re-link asks the phone for
+all the history it will share (see
+[Requesting full history](#requesting-full-history)). The flag only changes
+what a pairing asks for: restarting a bridge that is already linked never
+triggers a resync. Stop any bridge you started by hand, then run from the
+repository root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-task-windows.ps1
+```
+
+The installer builds `whatsapp-bridge\whatsapp-bridge.exe` with `go build` when
+Go and a cgo C compiler are available (see [Windows](#windows)), and otherwise
+uses the existing binary. Without an accounts file (see
+[Several accounts on Windows](#several-accounts-on-windows)), it registers one
+task, `whatsapp-mcp-bridge`, writes
+generated support files to `%LOCALAPPDATA%\whatsapp-mcp\`, and writes logs to
+`%LOCALAPPDATA%\whatsapp-mcp\logs\`. The task runs a generated PowerShell
+runner that starts the bridge in `whatsapp-bridge\` and starts it again 10
+seconds after it exits. Reinstalling stops the task and the bridge it runs,
+and the installer refuses to continue while the bridge port is still in use.
+
+The task does not start `powershell.exe` directly, because Task Scheduler
+would give it a console window, and Windows Terminal, the default terminal on
+Windows 11, keeps that window minimized in the taskbar instead of hiding it.
+Instead, the installer compiles a small launcher,
+`%LOCALAPPDATA%\whatsapp-mcp\whatsapp-bridge-launcher.exe`, with the `csc.exe`
+that ships with Windows. The launcher opens no window, and it ends the runner
+and the bridge when the task stops. Its C# source is in
+`scripts\install-task-windows.ps1`. The launcher is unsigned, so antivirus
+software may flag it.
+
+To customize the task environment, set variables before running the installer.
+Re-run the installer after changing them; saved values are otherwise preserved.
+To drop the saved values, uninstall and then install again. On Windows,
+`WHATSAPP_MEDIA_ROOTS` separates directories with `;`.
+
+```powershell
+$env:WHATSAPP_BRIDGE_PORT = "8080"
+$env:WEBHOOK_URL = "http://localhost:8769/whatsapp/webhook"
+$env:FORWARD_SELF = "false"
+$env:WHATSAPP_MEDIA_ROOTS = "$env:USERPROFILE\.local\share\whatsapp-mcp\outbox"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-task-windows.ps1
+```
+
+The installer also passes through `WEBHOOK_ENABLED`,
+`WHATSAPP_AUTO_DOWNLOAD_MEDIA`, `WHATSAPP_DEVICE_NAME`, and
+`WHATSAPP_BRIDGE_TOKEN`. It saves these
+values in `%LOCALAPPDATA%\whatsapp-mcp\bridge-task.json`, which only your user
+account can read. Without an explicit `WHATSAPP_BRIDGE_TOKEN`, the bridge keeps
+using `whatsapp-bridge\store\.bridge-token`.
+
+Verify the task and inspect logs:
+
+```powershell
+Get-ScheduledTask -TaskName whatsapp-mcp-bridge | Get-ScheduledTaskInfo
+Get-Content "$env:LOCALAPPDATA\whatsapp-mcp\logs\runner.log" -Tail 20
+Get-Content "$env:LOCALAPPDATA\whatsapp-mcp\logs\bridge.out.log" -Tail 100 -Encoding UTF8
+```
+
+Stop the bridge until the next login, or start it again:
+
+```powershell
+Stop-ScheduledTask -TaskName whatsapp-mcp-bridge
+Start-ScheduledTask -TaskName whatsapp-mcp-bridge
+```
+
+Uninstall the task and the generated support files with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\uninstall-task-windows.ps1
+```
+
+Uninstall stops the task and the bridge it runs, and preserves
+`whatsapp-bridge\store\`, including WhatsApp session DBs, message DBs, media,
+and `.bridge-token`. Logs are left in `%LOCALAPPDATA%\whatsapp-mcp\logs\` for
+manual cleanup.
+
+#### Link or re-link a phone on Windows
+
+A bridge started by the task links a phone the same way in both modes. When it
+starts without a linked phone (never paired, or unlinked from the phone), it
+writes the QR code to `store\pairing-qr.html` in its working directory and opens
+that page in your default browser. On your phone, open WhatsApp → Settings →
+Linked devices → Link a device and scan the code. The page shows each new code
+as WhatsApp rotates it, and says "Phone linked" once you are done.
+
+The codes stop after a few minutes. The bridge then keeps running without a
+phone, and the page says "QR code expired" and keeps reloading. A bridge whose
+phone unlinked it (`list_accounts` or `GET /api/connection` reports
+`logged_out`) also waits without showing a code. To get a new code, restart
+only that bridge's task, here the `work` account's (without an accounts file
+the task is `whatsapp-mcp-bridge`). The other accounts keep running, and the
+new code shows in the same tab if it is still open:
+
+```powershell
+Stop-ScheduledTask -TaskName whatsapp-mcp-bridge-work
+Start-ScheduledTask -TaskName whatsapp-mcp-bridge-work
+```
+
+Alternatively, ask the
+running bridge for a new code with `POST /api/connection/reconnect` (see
+[Connection status and phone linking](#connection-status-and-phone-linking)),
+using the token in that account's `store\.bridge-token`.
+
+Every link made through the task asks the phone for full history
+(`--full-history-pair`). History sync can take a while after the phone is
+linked; the bridge stores it as it arrives. An account linked earlier without
+the flag keeps the history it got then. To ask for the rest, unlink the bridge
+on the phone (WhatsApp → Settings → Linked devices → the bridge → Log out),
+restart that account's task as above, and scan the new code. The messages
+already in `messages.db` are kept.
+
+#### Several accounts on Windows
+
+With an [accounts file](#several-whatsapp-numbers-accounts-file), the installer
+registers one task per account, `whatsapp-mcp-bridge-<name>`, so every bridge
+starts at login and restarts on its own. It reads the file named by
+`-AccountsFile`, or else by `WHATSAPP_ACCOUNTS_FILE`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-task-windows.ps1 -AccountsFile "$env:USERPROFILE\wa\accounts.json"
+```
+
+For each account, the task runs the bridge with the parent of its `store_dir`
+as working directory (a relative `store_dir` is relative to the accounts file)
+and with `WHATSAPP_BRIDGE_PORT` set to the port of its `api_url`. Each account
+gets its own launcher, runner, config and logs in
+`%LOCALAPPDATA%\whatsapp-mcp\<name>\`. An account that is not linked yet opens
+its QR code in the browser when its task starts (see
+[Link or re-link a phone on Windows](#link-or-re-link-a-phone-on-windows)); the
+page's title names the account's folder.
+
+The installer checks the whole file before it touches any task, and stops with
+a message naming the entry and the problem when the file is missing or not a
+JSON list, a `store_dir` does not end in a folder named `store` (the bridge
+keeps its data in `store\` under its working directory), an `api_url` has no
+explicit port (write `http://localhost:8081/api`, not `http://localhost/api`),
+two accounts share a port or a `store_dir`, or an entry has a field other than
+`name`, `store_dir` and `api_url`.
+
+All accounts run the same bridge executable: by default the one built in the
+checkout as above, or the one you pass with `-Binary <path>`. The other
+variables listed above apply to every account and are saved per account.
+`WHATSAPP_BRIDGE_TOKEN` is never saved or passed in this mode, because the MCP
+server reads each account's token from `.bridge-token` in its `store_dir`.
+
+Re-run the installer after editing the accounts file: it replaces each listed
+account's task and keeps its saved settings. It does not remove the task of an
+account you deleted from the file; uninstall that one by name. Uninstall every
+`whatsapp-mcp-bridge` and `whatsapp-mcp-bridge-*` task, or one account's:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\uninstall-task-windows.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\uninstall-task-windows.ps1 -Name work
+```
+
+Uninstalling keeps every store folder and every log.
+
 ### CLI flags (Go bridge)
 
 | Flag                  | Default | Description                                                                                                                                                                                                                                                       |
 | --------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--full-history-pair` | `false` | Request full history at pair time. Only takes effect on a fresh pair (no existing `whatsapp.db`); no-op for already-paired sessions. The phone ultimately decides the actual history window sent — see [Requesting full history](#requesting-full-history) below. |
+| `--qr-browser` | `false` | Also show the pairing QR code in your default web browser. The bridge writes a page to `store/pairing-qr.html` that reloads every 2 seconds, so it always shows the current code, and opens it when pairing starts. Once pairing ends the page no longer contains the code. Use it when the terminal QR is unreadable (Windows consoles, Git Bash, small windows, log output scrolling it away). |
 
 ### Requesting full history
 
@@ -1175,7 +1356,7 @@ are preserved.
   release and rebuild the bridge. WhatsApp periodically raises the minimum
   supported linked-device client version, which can make older whatsmeow builds
   fail before pairing completes.
-- **QR Code Not Displaying**: Restart the bridge. Check terminal QR code support.
+- **QR Code Not Displaying**: Restart the bridge with `--qr-browser` to show the code in your web browser instead of relying on the terminal.
 - **Phone says "check your connection" after scanning**: WhatsApp answers a scan
   with a `companion_reg_refresh` notification, whatsmeow rotates the pairing
   secret, and the bridge prints a **new** QR code marked `QR code refreshed`.
@@ -1247,6 +1428,9 @@ Windows requires CGO for go-sqlite3. Install [MSYS2](https://www.msys2.org/) and
 go env -w CGO_ENABLED=1
 go run .
 ```
+
+To start the bridge at login and keep it running, see
+[Run automatically on Windows](#run-automatically-on-windows).
 
 ## Security Notice
 
